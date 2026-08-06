@@ -12,12 +12,37 @@ commands.
 
 Python 3.10+ and a working BlueZ Bluetooth stack are required.
 
+### Recommended: `pipx`
+
+`pipx` keeps Python dependencies isolated but exposes `blemeshctl` directly on
+your normal shell `PATH`, so no virtual-environment activation is needed.
+
+On Arch-based distributions such as CachyOS, install it once:
+
+```bash
+sudo pacman -S python-pipx
+pipx ensurepath
+```
+
+Then, from a checkout of this repository, install the CLI:
+
+```bash
+pipx install --editable .
+blemeshctl scan
+```
+
+Open a new shell after `pipx ensurepath` if `blemeshctl` is not immediately
+found. To update an editable checkout after changing dependencies, run
+`pipx reinstall blemeshctl`.
+
+### Development fallback
+
 ```bash
 git clone https://github.com/topiautio/blemeshctl.git
 cd blemeshctl
 python -m venv .venv
 .venv/bin/pip install -e .
-. .venv/bin/activate
+.venv/bin/blemeshctl scan
 ```
 
 On Linux, first confirm that Bluetooth is enabled and the target is visible:
