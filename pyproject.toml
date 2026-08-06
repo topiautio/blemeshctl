@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blemeshctl"
+version = "0.1.0"
+description = "A small CLI for legacy Telink BleMesh lights"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.22",
+    "cryptography>=42",
+]
+keywords = ["bluetooth", "ble", "telink", "light", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Home Automation",
+]
+
+[project.scripts]
+blemeshctl = "blemeshctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"
