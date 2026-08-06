@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import asyncio
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from blemeshctl.daemon import DaemonError, KeepaliveDaemon, _request
+from blemeshctl.protocol import AdvertisementInfo
+
+
+INFO = AdvertisementInfo(
+    address="A4:C1:38:93:1B:72",
+    name="BleMesh",
+    mesh_uuid=0x0211,
+    product_uuid=0x0004,
+    status=1,
+    mesh_address=0x0067,
+    rssi=-50,
+)
+
+
+class FakeSession:
+    instances: list["FakeSession"] = []
+
+    def __init__(self, **settings: object) -> None:
+        self.settings = settings
+        self.is_connected = False
+        self.info: AdvertisementInfo | None = None
+        self.commands: list[tuple[int, bytes]] = []
+        self.closed = False
+        type(self).instances.append(self)
+
+    async def send(self, opcode: int, parameters: bytes) -> AdvertisementInfo:
+        self.is_connected = True
+        self.info = INFO
+        self.commands.append((opcode, parameters))
+        return INFO
+
+    async def close(self) -> None:
+        self.is_connected = False
+        self.closed = True
+
+
+def command_request(**overrides: object) -> dict[str, object]:
+    request: dict[str, object] = {
+        "type": "command",
+        "opcode": 0xF1,
+        "parameters": "6400ff0000000000",
+        "address": "A4:C1:38:93:1B:72",
+        "mesh_name": "BleMesh",
+        "password": "mesh123",
+        "scan_timeout": 20,
+        "connect_timeout": 20,
+        "idle_timeout": 60,
+    }
+    request.update(overrides)
+    return request
+
+
+class KeepaliveDaemonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        FakeSession.instances = []
+
+    def test_reuses_session_when_only_timeouts_change(self) -> None:
+        async def scenario() -> tuple[dict[str, object], dict[str, object]]:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            first = await daemon.execute_command(command_request(scan_timeout=25))
+            second = await daemon.execute_command(command_request(connect_timeout=30))
+            return first, second
+
+        with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+            first, second = asyncio.run(scenario())
+
+        self.assertFalse(first["reused"])
+        self.assertTrue(second["reused"])
+        self.assertEqual(len(FakeSession.instances), 1)
+        self.assertEqual(len(FakeSession.instances[0].commands), 2)
+
+    def test_rejects_different_mesh_credentials(self) -> None:
+        async def scenario() -> None:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            await daemon.execute_command(command_request())
+            with self.assertRaises(DaemonError):
+                await daemon.execute_command(command_request(password="different"))
+
+        with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+            asyncio.run(scenario())
+
+    def test_unix_socket_reuses_connection_and_stops_cleanly(self) -> None:
+        async def scenario(socket_path: Path) -> tuple[dict[str, object], dict[str, object]]:
+            daemon = KeepaliveDaemon(socket_path)
+            task = asyncio.create_task(daemon.serve())
+            for _ in range(100):
+                if socket_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("daemon did not create its socket")
+            first = await _request(socket_path, command_request())
+            second = await _request(socket_path, command_request(parameters="640000ff00000000"))
+            await _request(socket_path, {"type": "stop"})
+            await task
+            return first, second
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            socket_path = Path(temporary_directory) / "control.sock"
+            with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+                first, second = asyncio.run(scenario(socket_path))
+
+        self.assertFalse(first["reused"])
+        self.assertTrue(second["reused"])
+        self.assertEqual(len(FakeSession.instances), 1)
+        self.assertTrue(FakeSession.instances[0].closed)
+
+    def test_idle_timeout_closes_the_retained_connection(self) -> None:
+        async def scenario(socket_path: Path) -> dict[str, object]:
+            daemon = KeepaliveDaemon(socket_path)
+            task = asyncio.create_task(daemon.serve())
+            for _ in range(100):
+                if socket_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("daemon did not create its socket")
+            response = await _request(socket_path, command_request(idle_timeout=0.05))
+            await asyncio.wait_for(task, timeout=1.0)
+            self.assertFalse(socket_path.exists())
+            return response
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            socket_path = Path(temporary_directory) / "control.sock"
+            with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+                response = asyncio.run(scenario(socket_path))
+
+        self.assertEqual(response["idle_timeout"], 0.05)
+        self.assertEqual(len(FakeSession.instances), 1)
+        self.assertTrue(FakeSession.instances[0].closed)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -90,13 +90,40 @@ Set colour brightness independently (1 through 100):
 blemeshctl color '#00ff00' --brightness 65 --address A4:C1:38:93:1B:72
 ```
 
+## Fast repeated controls
+
+The first control command has to wait for the light to advertise, connect, and
+authenticate. After that, `blemeshctl` automatically keeps the authenticated
+connection open for 60 seconds after the last command. A new `on`, `off`, or
+`color` command for the same address reuses it and resets the one-minute timer:
+
+```bash
+blemeshctl color ff0000 --address A4:C1:38:93:1B:72
+blemeshctl color 00ff00 --address A4:C1:38:93:1B:72
+blemeshctl color 0000ff --address A4:C1:38:93:1B:72
+```
+
+The connection runs in a private per-user Unix socket under
+`$XDG_RUNTIME_DIR` and closes automatically when idle. Inspect or close it
+explicitly when useful:
+
+```bash
+blemeshctl daemon status --address A4:C1:38:93:1B:72
+blemeshctl daemon stop --address A4:C1:38:93:1B:72
+```
+
+Use `--keepalive-seconds 0` to close the retained connection immediately after
+one command, or choose another value up to one hour.
+
 ## How it works
 
 This is a legacy proprietary Telink mesh protocol, not Bluetooth SIG Mesh.
 The device does not require Bluetooth pairing, but it does require an
 application-level AES challenge/response login. `blemeshctl` performs that
-login for each control operation, derives a fresh session key, and sends the
-encrypted vendor command to the mesh address advertised by the target.
+login when it opens a connection, derives a session key, and sends encrypted
+vendor commands to the mesh address advertised by the target. The local
+keepalive daemon retains that GATT connection only for normal light controls;
+it does not expose provisioning, reset, or OTA operations.
 
 The command encryption is implemented in Python and tested against a known
 Telink native-library output vector. No APK or Android shared library is
@@ -109,7 +136,8 @@ python -m unittest discover -s tests -v
 ```
 
 The unit tests cover advertisement parsing, authentication key derivation,
-the command-frame layout, and the Telink command-encryption test vector.
+the command-frame layout, the Telink command-encryption test vector, retained
+GATT sessions, and the daemon's socket and idle-timeout lifecycle.
 
 ## Safety notes
 
