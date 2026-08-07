@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from .client import DEFAULT_CONNECTION_SCAN_TIMEOUT, BleMeshError, discover_lights
 from .daemon import DaemonError, request_daemon, socket_path_for_address
@@ -16,11 +17,15 @@ from .protocol import (
     TelinkProtocolError,
     off_parameters,
     on_parameters,
+    parse_rgb,
     rgb_parameters,
 )
+from .script import Delay, LightCommand, ScriptError, ScriptStep, execute_script, load_script
 
 
-def _add_connection_options(parser: argparse.ArgumentParser) -> None:
+def _add_connection_options(
+    parser: argparse.ArgumentParser, *, wait_for_connection_default: bool = False
+) -> None:
     parser.add_argument("--address", help="Bluetooth MAC address; required when multiple lights are visible")
     parser.add_argument("--mesh-name", default=DEFAULT_MESH_NAME, help=f"mesh name (default: {DEFAULT_MESH_NAME})")
     parser.add_argument("--password", default=DEFAULT_PASSWORD, help="mesh password")
@@ -31,6 +36,12 @@ def _add_connection_options(parser: argparse.ArgumentParser) -> None:
         help="maximum advertising scan time in seconds",
     )
     parser.add_argument("--connect-timeout", type=float, default=20.0, help="GATT connection timeout in seconds")
+    parser.add_argument(
+        "--wait-for-connection",
+        action=argparse.BooleanOptionalAction,
+        default=wait_for_connection_default,
+        help="retry a known --address's discovery and initial connection (Ctrl-C stops waiting)",
+    )
     parser.add_argument(
         "--keepalive-seconds",
         type=float,
@@ -57,20 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     color.add_argument("--brightness", type=int, default=100, help="brightness from 1 through 100")
     _add_connection_options(color)
 
+    script = subcommands.add_parser("script", help="run a light-control script file")
+    script.add_argument("script", type=Path, help="path to a script file")
+    _add_connection_options(script, wait_for_connection_default=True)
+
     daemon = subcommands.add_parser("daemon", help="inspect or stop a local keepalive connection")
     daemon.add_argument("action", choices=("status", "stop"), help="daemon action")
     daemon.add_argument("--address", help="Bluetooth MAC address for the retained connection")
     return parser
-
-
-def _parse_rgb(value: str) -> tuple[int, int, int]:
-    value = value.removeprefix("#")
-    if len(value) != 6:
-        raise TelinkProtocolError("RGB colour must contain exactly six hexadecimal digits")
-    try:
-        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
-    except ValueError as exc:
-        raise TelinkProtocolError("RGB colour must contain only hexadecimal digits") from exc
 
 
 def _format_light(light: object) -> str:
@@ -82,6 +87,72 @@ def _format_light(light: object) -> str:
     )
 
 
+async def _send_command(
+    arguments: argparse.Namespace,
+    socket_path: Path,
+    opcode: int,
+    parameters: bytes,
+    description: str,
+    *,
+    report: bool = True,
+) -> None:
+    request = {
+        "type": "command",
+        "opcode": opcode,
+        "parameters": parameters.hex(),
+        "address": arguments.address,
+        "mesh_name": arguments.mesh_name,
+        "password": arguments.password,
+        "scan_timeout": arguments.scan_timeout,
+        "connect_timeout": arguments.connect_timeout,
+        "idle_timeout": arguments.keepalive_seconds,
+    }
+    waiting_reported = False
+    while True:
+        try:
+            response = await request_daemon(request, socket_path=socket_path)
+            break
+        except DaemonError as exc:
+            if not arguments.wait_for_connection or not exc.retryable:
+                raise
+            if not waiting_reported:
+                target = arguments.address or "a compatible Telink light"
+                print(f"Waiting for {target} to advertise and accept a Bluetooth connection; press Ctrl-C to stop.")
+                waiting_reported = True
+            await asyncio.sleep(1.0)
+
+    if report:
+        connection = "reused" if response["reused"] else "opened"
+        print(
+            f"{description} command sent to {response['address']} "
+            f"(mesh 0x{response['mesh_address']:04x}; connection {connection}, "
+            f"kept for {response['idle_timeout']:g}s after the last command)"
+        )
+
+
+async def _run_script(
+    arguments: argparse.Namespace, socket_path: Path, program: tuple[ScriptStep, ...]
+) -> None:
+    source = str(arguments.script)
+
+    async def send_command(command: LightCommand) -> None:
+        await _send_command(
+            arguments,
+            socket_path,
+            command.opcode,
+            command.parameters,
+            f"{source}:{command.line}: {command.description}",
+            report=command.report,
+        )
+
+    async def wait(delay: Delay) -> None:
+        if delay.report:
+            print(f"{source}:{delay.line}: waiting {delay.seconds:g}s")
+        await asyncio.sleep(delay.seconds)
+
+    await execute_script(program, send_command=send_command, wait=wait)
+
+
 async def run(arguments: argparse.Namespace) -> int:
     if arguments.command == "scan":
         lights = await discover_lights(arguments.timeout)
@@ -91,6 +162,13 @@ async def run(arguments: argparse.Namespace) -> int:
         for light in lights:
             print(_format_light(light))
         return 0
+
+    if arguments.command == "script":
+        # Compile before locating or starting the daemon, so a bad final line
+        # cannot result in earlier valid lines being sent to a light.
+        program = load_script(arguments.script)
+    else:
+        program = None
 
     socket_path = socket_path_for_address(arguments.address)
     if arguments.command == "daemon":
@@ -118,36 +196,22 @@ async def run(arguments: argparse.Namespace) -> int:
             print("Keepalive daemon is starting a Bluetooth connection.")
         return 0
 
+    if arguments.command == "script":
+        assert program is not None
+        await _run_script(arguments, socket_path, program)
+        return 0
+
     if arguments.command == "on":
         opcode, parameters, description = COMMAND_ON_OFF, on_parameters(), "on"
     elif arguments.command == "off":
         opcode, parameters, description = COMMAND_ON_OFF, off_parameters(), "off"
     else:
-        red, green, blue = _parse_rgb(arguments.rgb)
+        red, green, blue = parse_rgb(arguments.rgb)
         opcode = COMMAND_RGB
         parameters = rgb_parameters(red, green, blue, arguments.brightness)
         description = f"colour rgb #{red:02x}{green:02x}{blue:02x}, brightness {arguments.brightness}"
 
-    response = await request_daemon(
-        {
-            "type": "command",
-            "opcode": opcode,
-            "parameters": parameters.hex(),
-            "address": arguments.address,
-            "mesh_name": arguments.mesh_name,
-            "password": arguments.password,
-            "scan_timeout": arguments.scan_timeout,
-            "connect_timeout": arguments.connect_timeout,
-            "idle_timeout": arguments.keepalive_seconds,
-        },
-        socket_path=socket_path,
-    )
-    connection = "reused" if response["reused"] else "opened"
-    print(
-        f"{description} command sent to {response['address']} "
-        f"(mesh 0x{response['mesh_address']:04x}; connection {connection}, "
-        f"kept for {response['idle_timeout']:g}s after the last command)"
-    )
+    await _send_command(arguments, socket_path, opcode, parameters, description)
     return 0
 
 
@@ -156,7 +220,7 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         raise SystemExit(asyncio.run(run(arguments)))
-    except (BleMeshError, DaemonError, TelinkProtocolError) as exc:
+    except (BleMeshError, DaemonError, ScriptError, TelinkProtocolError) as exc:
         parser.exit(2, f"blemeshctl: error: {exc}\n")
     except KeyboardInterrupt:
         parser.exit(130, "blemeshctl: interrupted\n")

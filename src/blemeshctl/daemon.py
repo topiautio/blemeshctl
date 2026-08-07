@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .client import DEFAULT_CONNECTION_SCAN_TIMEOUT, BleMeshError, BleMeshSession
+from .client import (
+    DEFAULT_CONNECTION_SCAN_TIMEOUT,
+    BleMeshError,
+    BleMeshSession,
+    InitialConnectionError,
+)
 from .protocol import TelinkProtocolError
 
 DEFAULT_IDLE_TIMEOUT = 60.0
@@ -24,6 +29,10 @@ MAX_IDLE_TIMEOUT = 3600.0
 
 class DaemonError(RuntimeError):
     """Raised when the local keepalive daemon cannot process a request."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -134,7 +143,10 @@ async def _request(socket_path: Path, payload: dict[str, Any]) -> dict[str, Any]
     if not isinstance(response, dict):
         raise DaemonError("keepalive daemon returned an invalid response")
     if not response.get("ok"):
-        raise DaemonError(str(response.get("error", "keepalive daemon rejected the request")))
+        raise DaemonError(
+            str(response.get("error", "keepalive daemon rejected the request")),
+            retryable=response.get("retryable") is True,
+        )
     return response
 
 
@@ -261,6 +273,11 @@ class KeepaliveDaemon:
                 info = await self._session.send(opcode, parameters)
                 self.idle_timeout = idle_timeout
                 self._touch()
+        except InitialConnectionError as exc:
+            # Retrying with no address could later select a different nearby
+            # generic BleMesh device. Only an explicitly selected MAC is safe
+            # to wait for indefinitely.
+            raise DaemonError(str(exc), retryable=config.address is not None) from exc
         except (BleMeshError, TelinkProtocolError) as exc:
             raise DaemonError(str(exc)) from exc
         finally:
@@ -304,6 +321,8 @@ class KeepaliveDaemon:
                 raise DaemonError("unknown keepalive daemon request")
         except (DaemonError, json.JSONDecodeError) as exc:
             response = {"ok": False, "error": str(exc)}
+            if isinstance(exc, DaemonError) and exc.retryable:
+                response["retryable"] = True
         except Exception as exc:
             response = {"ok": False, "error": f"daemon request failed: {exc}"}
         try:

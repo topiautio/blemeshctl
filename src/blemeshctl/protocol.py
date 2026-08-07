@@ -21,6 +21,18 @@ class TelinkProtocolError(ValueError):
     """Raised when an advertisement, login response, or command is invalid."""
 
 
+def parse_rgb(value: str) -> tuple[int, int, int]:
+    """Parse a conventional ``RRGGBB`` or ``#RRGGBB`` colour value."""
+
+    value = value.removeprefix("#")
+    if len(value) != 6:
+        raise TelinkProtocolError("RGB colour must contain exactly six hexadecimal digits")
+    try:
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    except ValueError as exc:
+        raise TelinkProtocolError("RGB colour must contain only hexadecimal digits") from exc
+
+
 @dataclass(frozen=True)
 class AdvertisementInfo:
     """Fields exposed by a Telink manufacturer advertisement."""

@@ -36,6 +36,14 @@ class BleMeshError(RuntimeError):
     """Raised when discovery or a GATT command cannot be completed."""
 
 
+class InitialConnectionError(BleMeshError):
+    """A retryable failure before any encrypted light command was sent."""
+
+
+class LightUnavailableError(InitialConnectionError):
+    """The explicitly selected light was not advertising a usable Telink payload."""
+
+
 @dataclass(frozen=True)
 class DiscoveredLight:
     """A compatible BLE device and its Telink advertisement information."""
@@ -98,7 +106,7 @@ async def select_light(address: str | None, timeout: float) -> DiscoveredLight:
         await BleakScanner.find_device_by_filter(matches_target, timeout=timeout)
         if selected is not None:
             return selected
-        raise BleMeshError(f"{normalized} was not advertising as a compatible Telink light")
+        raise LightUnavailableError(f"{normalized} was not advertising as a compatible Telink light")
 
     lights = await discover_lights(timeout)
     if not lights:
@@ -220,12 +228,18 @@ class BleMeshSession:
             session_key = derive_session_key(
                 self.mesh_name, self.password, local_random, pair_response
             )
-        except Exception:
+        except TelinkProtocolError:
             try:
                 await client.disconnect()
             except Exception:
                 pass
             raise
+        except Exception as exc:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            raise InitialConnectionError(f"Bluetooth connection attempt failed: {exc}") from exc
         self._client = client
         self._info = target.info
         self._session_key = session_key

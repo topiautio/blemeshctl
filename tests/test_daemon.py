@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from blemeshctl.client import InitialConnectionError
 from blemeshctl.daemon import DaemonError, KeepaliveDaemon, _request
 from blemeshctl.protocol import AdvertisementInfo
 
@@ -41,6 +42,11 @@ class FakeSession:
     async def close(self) -> None:
         self.is_connected = False
         self.closed = True
+
+
+class UnavailableSession(FakeSession):
+    async def send(self, opcode: int, parameters: bytes) -> AdvertisementInfo:
+        raise InitialConnectionError("light is temporarily unavailable")
 
 
 def command_request(**overrides: object) -> dict[str, object]:
@@ -87,6 +93,59 @@ class KeepaliveDaemonTests(unittest.TestCase):
 
         with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
             asyncio.run(scenario())
+
+    def test_marks_an_initial_connection_failure_retryable(self) -> None:
+        async def scenario() -> DaemonError:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            try:
+                await daemon.execute_command(command_request())
+            except DaemonError as exc:
+                return exc
+            self.fail("expected the unavailable session to fail")
+
+        with patch("blemeshctl.daemon.BleMeshSession", UnavailableSession):
+            error = asyncio.run(scenario())
+
+        self.assertTrue(error.retryable)
+        self.assertEqual(str(error), "light is temporarily unavailable")
+
+    def test_does_not_retry_an_unaddressed_initial_connection_failure(self) -> None:
+        async def scenario() -> DaemonError:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            try:
+                await daemon.execute_command(command_request(address=None))
+            except DaemonError as exc:
+                return exc
+            self.fail("expected the unavailable session to fail")
+
+        with patch("blemeshctl.daemon.BleMeshSession", UnavailableSession):
+            error = asyncio.run(scenario())
+
+        self.assertFalse(error.retryable)
+
+    def test_socket_error_preserves_the_retryable_marker(self) -> None:
+        async def scenario(socket_path: Path) -> DaemonError:
+            async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                await reader.readline()
+                writer.write(b'{"ok":false,"error":"temporarily unavailable","retryable":true}\n')
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_unix_server(handler, path=str(socket_path))
+            try:
+                with self.assertRaises(DaemonError) as caught:
+                    await _request(socket_path, {"type": "command"})
+                return caught.exception
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            error = asyncio.run(scenario(Path(temporary_directory) / "control.sock"))
+
+        self.assertTrue(error.retryable)
+        self.assertEqual(str(error), "temporarily unavailable")
 
     def test_unix_socket_reuses_connection_and_stops_cleanly(self) -> None:
         async def scenario(socket_path: Path) -> tuple[dict[str, object], dict[str, object]]:
