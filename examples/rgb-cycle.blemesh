@@ -1,0 +1,14 @@
+# Turn the light on, then cycle red, green, and blue until interrupted.
+# Run with:
+# blemeshctl script examples/rgb-cycle.blemesh --address A4:C1:38:93:1B:72
+# Stop the loop with Ctrl-C.
+
+on
+
+loop:
+  color ff0000
+  wait 1s
+  color 00ff00
+  wait 1s
+  color 0000ff
+  wait 1s

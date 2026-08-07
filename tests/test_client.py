@@ -12,6 +12,7 @@ from blemeshctl.client import (
     BleMeshController,
     BleMeshSession,
     DiscoveredLight,
+    LightUnavailableError,
     select_light,
 )
 from blemeshctl.protocol import (
@@ -131,6 +132,15 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(selected.device, device)
         self.assertEqual(selected.info.mesh_address, 0x0067)
+
+    def test_explicit_address_absence_is_a_retryable_light_unavailable_error(self) -> None:
+        async def find_no_target(matches_target, *, timeout: float) -> None:
+            self.assertEqual(timeout, 20)
+            return None
+
+        with patch("blemeshctl.client.BleakScanner.find_device_by_filter", new=find_no_target):
+            with self.assertRaisesRegex(LightUnavailableError, "was not advertising"):
+                asyncio.run(select_light("a4:c1:38:93:1b:72", 20))
 
     def test_session_reuses_one_authenticated_connection(self) -> None:
         async def send_twice() -> None:

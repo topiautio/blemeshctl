@@ -1,0 +1,10 @@
+# Turn the light on, then cycle through every fully saturated 8-bit RGB hue.
+# The 1,530-step wheel never sends white or a pastel colour.
+# Run with:
+# blemeshctl script examples/rainbow.blemesh --address A4:C1:38:93:1B:72
+# Stop the loop with Ctrl-C.
+
+on
+
+loop:
+  rainbow 100ms
