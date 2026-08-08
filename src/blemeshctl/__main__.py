@@ -1,6 +1,6 @@
 """Run the command-line interface with ``python -m blemeshctl``."""
 
-from .cli import main
+from blemeshctl.standalone import main
 
 
 main()

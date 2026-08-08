@@ -8,6 +8,24 @@ It supports only normal light controls: discovery, on, off, and solid RGB
 colour. It intentionally does not expose provisioning, factory-reset, or OTA
 commands.
 
+## Download
+
+For 64-bit Linux, each tagged GitHub Release includes one standalone executable
+with Python and the required Python packages bundled inside. Download the latest
+build without cloning this repository:
+
+```bash
+curl --fail --location \
+  --output blemeshctl \
+  https://github.com/topiautio/blemeshctl/releases/latest/download/blemeshctl-linux-x86_64
+chmod +x blemeshctl
+./blemeshctl --help
+```
+
+The executable still needs the host's normal GNU/Linux runtime, BlueZ service,
+and Bluetooth adapter. It does not require a Python installation. Builds are
+validated on Ubuntu 22.04 and should run on newer glibc-based x86_64 systems.
+
 ## Install
 
 Python 3.10+ and a working BlueZ Bluetooth stack are required.
@@ -204,6 +222,18 @@ The unit tests cover advertisement parsing, authentication key derivation,
 the command-frame layout, the Telink command-encryption test vector, script
 parsing and execution, retained GATT sessions, and the daemon's socket and
 idle-timeout lifecycle.
+
+Build and smoke-test the same one-file executable produced by GitHub Actions:
+
+```bash
+.venv/bin/pip install -e '.[standalone]'
+.venv/bin/python -m PyInstaller --clean --noconfirm blemeshctl.spec
+scripts/smoke-standalone.sh dist/blemeshctl
+```
+
+Pull requests and pushes to `main` retain the verified executable as a workflow
+artifact. Pushing a version tag such as `v0.1.0` also creates a GitHub Release
+and attaches it as `blemeshctl-linux-x86_64`.
 
 ## Safety notes
 

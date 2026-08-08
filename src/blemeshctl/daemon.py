@@ -25,6 +25,7 @@ from .protocol import TelinkProtocolError
 
 DEFAULT_IDLE_TIMEOUT = 60.0
 MAX_IDLE_TIMEOUT = 3600.0
+INTERNAL_DAEMON_ARGUMENT = "--internal-daemon"
 
 
 class DaemonError(RuntimeError):
@@ -151,13 +152,35 @@ async def _request(socket_path: Path, payload: dict[str, Any]) -> dict[str, Any]
 
 
 def _spawn_daemon(socket_path: Path) -> None:
+    frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        command = [
+            sys.executable,
+            INTERNAL_DAEMON_ARGUMENT,
+            "--socket",
+            str(socket_path),
+        ]
+        environment = os.environ.copy()
+        # The daemon outlives the CLI. A one-file PyInstaller child therefore
+        # needs its own extraction directory instead of reusing the parent's.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "blemeshctl.daemon",
+            "--socket",
+            str(socket_path),
+        ]
+        environment = None
     subprocess.Popen(
-        [sys.executable, "-m", "blemeshctl.daemon", "--socket", str(socket_path)],
+        command,
         close_fds=True,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=environment,
     )
 
 

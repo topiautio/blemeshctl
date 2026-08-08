@@ -1,0 +1,126 @@
+name: Standalone executable
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARTIFACT_NAME: blemeshctl-linux-x86_64
+
+jobs:
+  build:
+    name: Build Linux x86_64 executable
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project and packaging tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install '.[standalone]'
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Match a release tag to the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          package_version=$(python -c 'from importlib.metadata import version; print(version("blemeshctl"))')
+          test "$GITHUB_REF_NAME" = "v$package_version"
+
+      - name: Build one-file executable
+        run: python -m PyInstaller --clean --noconfirm blemeshctl.spec
+
+      - name: Verify standalone executable
+        run: |
+          test "$(uname -m)" = x86_64
+          mv dist/blemeshctl "dist/$ARTIFACT_NAME"
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 1
+          scripts/smoke-standalone.sh "dist/$ARTIFACT_NAME"
+          file "dist/$ARTIFACT_NAME"
+          sha256sum "dist/$ARTIFACT_NAME"
+
+      - name: Upload standalone executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: dist/${{ env.ARTIFACT_NAME }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-artifact:
+    name: Verify uploaded executable
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download uploaded executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: downloaded
+          digest-mismatch: error
+
+      - name: Verify downloaded executable
+        run: |
+          test "$(find downloaded -maxdepth 1 -type f | wc -l)" -eq 1
+          chmod +x "downloaded/$ARTIFACT_NAME"
+          scripts/smoke-standalone.sh "downloaded/$ARTIFACT_NAME"
+          sha256sum "downloaded/$ARTIFACT_NAME"
+
+  release:
+    name: Publish GitHub Release asset
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+      - verify-artifact
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: release
+          digest-mismatch: error
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum "release/$ARTIFACT_NAME" | tee -a "$GITHUB_STEP_SUMMARY"
+          gh release create "$GITHUB_REF_NAME" \
+            "release/$ARTIFACT_NAME#Linux x86_64 executable" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes 'After downloading, run `chmod +x blemeshctl-linux-x86_64`.' \
+            --repo "$GITHUB_REPOSITORY"
