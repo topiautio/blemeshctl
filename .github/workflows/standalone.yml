@@ -67,10 +67,38 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  verify-artifact:
+    name: Verify uploaded executable
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download uploaded executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: downloaded
+          digest-mismatch: error
+
+      - name: Verify downloaded executable
+        run: |
+          test "$(find downloaded -maxdepth 1 -type f | wc -l)" -eq 1
+          chmod +x "downloaded/$ARTIFACT_NAME"
+          scripts/smoke-standalone.sh "downloaded/$ARTIFACT_NAME"
+          sha256sum "downloaded/$ARTIFACT_NAME"
+
   release:
     name: Publish GitHub Release asset
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs:
+      - build
+      - verify-artifact
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
