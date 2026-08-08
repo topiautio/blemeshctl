@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from blemeshctl.client import InitialConnectionError
-from blemeshctl.daemon import DaemonError, KeepaliveDaemon, _request
+from blemeshctl.daemon import (
+    INTERNAL_DAEMON_ARGUMENT,
+    DaemonError,
+    KeepaliveDaemon,
+    _request,
+    _spawn_daemon,
+)
 from blemeshctl.protocol import AdvertisementInfo
 
 
@@ -63,6 +72,62 @@ def command_request(**overrides: object) -> dict[str, object]:
     }
     request.update(overrides)
     return request
+
+
+class DaemonLaunchTests(unittest.TestCase):
+    def test_source_install_launches_daemon_as_a_python_module(self) -> None:
+        socket_path = Path("/tmp/blemeshctl-source.sock")
+        popen = Mock()
+        with (
+            patch.object(sys, "frozen", False, create=True),
+            patch.object(sys, "executable", "/usr/bin/python3"),
+            patch("blemeshctl.daemon.subprocess.Popen", popen),
+        ):
+            _spawn_daemon(socket_path)
+
+        popen.assert_called_once_with(
+            [
+                "/usr/bin/python3",
+                "-m",
+                "blemeshctl.daemon",
+                "--socket",
+                str(socket_path),
+            ],
+            close_fds=True,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=None,
+        )
+
+    def test_frozen_install_relaunches_an_independent_binary(self) -> None:
+        socket_path = Path("/tmp/blemeshctl-frozen.sock")
+        popen = Mock()
+        with (
+            patch.dict(os.environ, {"EXISTING": "value"}, clear=True),
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", "/tmp/blemeshctl"),
+            patch("blemeshctl.daemon.subprocess.Popen", popen),
+        ):
+            _spawn_daemon(socket_path)
+
+        arguments, options = popen.call_args
+        self.assertEqual(
+            arguments[0],
+            [
+                "/tmp/blemeshctl",
+                INTERNAL_DAEMON_ARGUMENT,
+                "--socket",
+                str(socket_path),
+            ],
+        )
+        self.assertEqual(
+            options["env"],
+            {"EXISTING": "value", "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+        )
+        self.assertTrue(options["close_fds"])
+        self.assertTrue(options["start_new_session"])
 
 
 class KeepaliveDaemonTests(unittest.TestCase):

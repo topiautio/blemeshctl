@@ -21,7 +21,12 @@ classifiers = [
 ]
 
 [project.scripts]
-blemeshctl = "blemeshctl.cli:main"
+blemeshctl = "blemeshctl.standalone:main"
+
+[project.optional-dependencies]
+standalone = [
+    "pyinstaller==6.21.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
