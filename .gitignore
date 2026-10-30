@@ -6,3 +6,8 @@ coverage.xml
 dist/
 build/
 *.egg-info/
+.gradle/
+.kotlin/
+local.properties
+*.jks
+*.keystore

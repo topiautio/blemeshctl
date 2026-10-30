@@ -1,0 +1,3 @@
+on
+loop:
+  rainbow 100ms

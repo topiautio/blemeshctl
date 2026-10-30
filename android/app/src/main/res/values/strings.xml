@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BleMesh CTL</string>
+    <string name="basic_controls">Perusohjaus</string>
+    <string name="bluetooth_permission">Bluetooth-lupa</string>
+    <string name="bluetooth_permission_ok">Bluetooth-lupa OK</string>
+    <string name="brightness">Kirkkaus: %1$d %%</string>
+    <string name="brightness_initial">Kirkkaus: 100 %%</string>
+    <string name="colour_wheel_description">Valitse valon väri värirullasta</string>
+    <string name="colour_wheel_help">Valitse sävy vetämällä merkkiä värirullassa. Keskellä väri on valkoinen ja reunalla voimakkain.</string>
+    <string name="default_mesh_name">BleMesh</string>
+    <string name="default_mesh_password">mesh123</string>
+    <string name="default_script">on\ncolor ff0000 100\nwait 1s\ncolor 00ff00 100\nwait 1s\ncolor 0000ff 100</string>
+    <string name="disconnect">Katkaise</string>
+    <string name="initial_status">Valmis. Viimeksi käytetty valo yhdistetään automaattisesti.</string>
+    <string name="light">Valo</string>
+    <string name="mesh_credentials">Mesh-tunnukset</string>
+    <string name="mesh_name">Mesh-nimi</string>
+    <string name="mesh_password">Mesh-salasana</string>
+    <string name="no_selected_device">Ei valittua laitetta.</string>
+    <string name="open_file">Avaa…</string>
+    <string name="rainbow_example">Sateenkaari</string>
+    <string name="rgb_example">RGB-malli</string>
+    <string name="run_script">Aja skripti</string>
+    <string name="safety_note">Sovellus lähettää vain normaalit on/off/RGB-komennot. Se ei tee paritusta, resetointia, provisiointia eikä OTA-päivityksiä.</string>
+    <string name="scan_eight_seconds">Skannaa 8 s</string>
+    <string name="script_heading">.blemesh-skripti</string>
+    <string name="script_help">Skripti validoidaan kokonaan ennen ensimmäistä komentoa. Se pyörii vain sovelluksen ollessa etualalla.</string>
+    <string name="selected_colour">Valittu väri</string>
+    <string name="selected_colour_preview">Valitun värin esikatselu</string>
+    <string name="selected_light_description">Löydetty BleMesh-valo</string>
+    <string name="set_colour">Lähetä valittu väri</string>
+    <string name="stop_script">Pysäytä</string>
+    <string name="subtitle">Legacy Telink -valon suora BLE-ohjaus</string>
+    <string name="turn_off">Pois</string>
+    <string name="turn_on">Päälle</string>
+</resources>
