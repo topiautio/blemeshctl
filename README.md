@@ -6,7 +6,8 @@ as `BleMesh`.
 
 It supports only normal light controls: discovery, on, off, and solid RGB
 colour. It intentionally does not expose provisioning, factory-reset, or OTA
-commands.
+commands. An [Android app](#android-app) with the same controls and script
+language lives in `android/`.
 
 ## Download
 
@@ -198,6 +199,79 @@ If a `wait` is at least as long as `--keepalive-seconds` (60 seconds by
 default), the next action will reconnect naturally; raise that option for
 longer pauses.
 
+## Android app
+
+The `android/` directory holds a native Android app that uses the same Telink
+protocol, `.blemesh` script language, and safety limits as the CLI. It scans for
+compatible lights, remembers the last one used and connects to it ahead of
+time, and offers on, off, a colour wheel with brightness, and a script editor
+with the two bundled examples. Scripts run only while the app is in the
+foreground. The interface is in Finnish.
+
+It needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask for
+the Nearby devices permission; older versions ask for location instead, which
+Android requires for Bluetooth scanning.
+
+Signed APKs are attached to GitHub Releases whose tags start with `android-v`,
+for example `android-v0.3.1`. Those releases are not marked as the latest
+release, so the Linux download link above keeps pointing at the CLI. Download
+the APK on the phone from the repository's Releases page and open it.
+
+Android updates an installed app only with a build signed by the same key. If a
+build signed with another key is installed, such as a local debug build,
+uninstall it first. That also clears its remembered light, mesh credentials,
+and script.
+
+### Build and release the Android app
+
+Building needs JDK 17 or newer and Android SDK platform 37 (`platforms;android-37.0`):
+
+```bash
+cd android
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+The debug APK is written to `android/app/build/outputs/apk/debug/`. The unit
+tests reuse the Python protocol test vectors and parse the scripts in
+`examples/`.
+
+Releases are signed in GitHub Actions with a key kept in repository secrets.
+Create the key once, outside the repository:
+
+```bash
+keytool -genkeypair -keystore blemeshctl-release.jks -storetype PKCS12 \
+  -alias blemeshctl -keyalg RSA -keysize 4096 -validity 10000 \
+  -dname "CN=blemeshctl"
+base64 -w0 blemeshctl-release.jks > blemeshctl-release.jks.base64
+```
+
+Then add these secrets under the repository's Settings, Secrets and variables,
+Actions:
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | Contents of `blemeshctl-release.jks.base64` |
+| `ANDROID_KEYSTORE_PASSWORD` | The keystore password |
+| `ANDROID_KEY_ALIAS` | `blemeshctl` |
+| `ANDROID_KEY_PASSWORD` | The keystore password again; PKCS12 keys share it |
+
+Back up `blemeshctl-release.jks` and its password somewhere safe. Every later
+update must be signed with the same key, and a lost key means users must
+uninstall the app to install a new one.
+
+To publish a release, set `versionCode` and `versionName` in
+`android/app/build.gradle.kts`, merge the change to `main`, and push a matching
+tag:
+
+```bash
+git tag android-v0.3.1
+git push origin android-v0.3.1
+```
+
+The workflow refuses to publish when the tag does not match `versionName`, when
+a signing secret is missing, or when the APK is debuggable. Pull requests that
+touch `android/` and pushes to `main` keep a debug APK as a workflow artifact.
+
 ## How it works
 
 This is a legacy proprietary Telink mesh protocol, not Bluetooth SIG Mesh.
@@ -208,9 +282,10 @@ vendor commands to the mesh address advertised by the target. The local
 keepalive daemon retains that GATT connection only for normal light controls;
 it does not expose provisioning, reset, or OTA operations.
 
-The command encryption is implemented in Python and tested against a known
-Telink native-library output vector. No APK or Android shared library is
-needed at runtime.
+The command encryption is implemented in Python, and again in Kotlin for the
+Android app; both are tested against the same known Telink native-library
+output vector. Neither needs the vendor's APK or Android shared library at
+runtime.
 
 ## Test
 

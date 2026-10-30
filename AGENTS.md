@@ -4,6 +4,8 @@
 
 This Python 3.10+ package uses a `src` layout. In `src/blemeshctl/`, `cli.py` parses commands, `client.py` handles BLE sessions, `daemon.py` retains connections, `protocol.py` implements Telink framing and cryptography, `script.py` handles `.blemesh` programs, and `standalone.py` routes the frozen executable. Matching unit tests live in `tests/test_*.py`; samples live in `examples/`. Standalone packaging is defined by `blemeshctl.spec`, `scripts/smoke-standalone.sh`, and `.github/workflows/standalone.yml`.
 
+The Android app in `android/` is a Kotlin Gradle project without AndroidX. Its `protocol/` and `script/` packages mirror `protocol.py` and `script.py`; `ble/` wraps Android GATT, and JVM tests live in `android/app/src/test/`. `.github/workflows/android.yml` builds it and publishes signed APKs for `android-v*` tags.
+
 ## Build, Test, and Development Commands
 
 ```bash
@@ -22,13 +24,19 @@ The test and help commands require no hardware; `scan` needs Linux, BlueZ, and a
 scripts/smoke-standalone.sh dist/blemeshctl
 ```
 
+Build and test the Android app with JDK 17+ and SDK platform 37:
+
+```bash
+cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
 ## Coding Style & Naming Conventions
 
 Use four-space indentation, type annotations, concise docstrings, and the existing `from __future__ import annotations` pattern. Name functions `snake_case`, classes `PascalCase`, and constants `UPPER_SNAKE_CASE`. Preserve async BLE/socket boundaries. No formatter or linter is configured; match nearby code and group imports as standard library, third-party, then local. Indent `.blemesh` blocks by two spaces.
 
 ## Testing Guidelines
 
-Tests use `unittest`: name files `test_<module>.py`, classes `<Area>Tests`, and methods `test_<behavior>`. Mock Bleak and daemon boundaries; tests must be deterministic. Add known vectors for cryptographic changes and failure-path tests where delivery is uncertain. No numeric coverage threshold exists, but behavior changes need focused regression coverage. Packaging changes must pass the standalone smoke test.
+Tests use `unittest`: name files `test_<module>.py`, classes `<Area>Tests`, and methods `test_<behavior>`. Mock Bleak and daemon boundaries; tests must be deterministic. Add known vectors for cryptographic changes and failure-path tests where delivery is uncertain. Mirror protocol and script-language changes in both implementations, reusing the same vectors. No numeric coverage threshold exists, but behavior changes need focused regression coverage. Packaging changes must pass the standalone smoke test.
 
 ## Commit & Pull Request Guidelines
 
