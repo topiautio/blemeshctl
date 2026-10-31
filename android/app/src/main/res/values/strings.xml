@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">BleMesh CTL</string>
+    <string name="appearance">Ulkoasu</string>
     <string name="basic_controls">Perusohjaus</string>
     <string name="bluetooth_permission">Bluetooth-lupa</string>
     <string name="bluetooth_permission_ok">Bluetooth-lupa OK</string>
@@ -19,6 +20,8 @@
     <string name="mesh_password">Mesh-salasana</string>
     <string name="no_selected_device">Ei valittua laitetta.</string>
     <string name="open_file">Avaa…</string>
+    <string name="pure_black_dark_theme">Täysmusta tumma teema (AMOLED)</string>
+    <string name="pure_black_help">Vaikuttaa vain, kun puhelin käyttää tummaa teemaa.</string>
     <string name="rainbow_example">Sateenkaari</string>
     <string name="rgb_example">RGB-malli</string>
     <string name="run_script">Aja skripti</string>

@@ -12,21 +12,21 @@
         <TextView
             android:textSize="28sp"
             android:textStyle="bold"
-            android:textColor="#12372a"
+            android:textColor="@color/text_primary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/app_name"/>
         <TextView
             android:textSize="14sp"
-            android:textColor="#49655a"
+            android:textColor="@color/text_secondary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:text="@string/subtitle"/>
         <TextView
-            android:textColor="#12372a"
+            android:textColor="@color/text_primary"
             android:id="@+id/statusText"
-            android:background="#e5f4ec"
+            android:background="?attr/statusBackground"
             android:padding="12dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -62,7 +62,7 @@
         </LinearLayout>
         <TextView
             android:textStyle="bold"
-            android:textColor="#12372a"
+            android:textColor="@color/text_primary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
@@ -75,7 +75,7 @@
             android:contentDescription="@string/selected_light_description"/>
         <TextView
             android:textSize="13sp"
-            android:textColor="#49655a"
+            android:textColor="@color/text_secondary"
             android:id="@+id/deviceDetailsText"
             android:paddingTop="4dp"
             android:layout_width="match_parent"
@@ -84,7 +84,7 @@
             android:textIsSelectable="true"/>
         <TextView
             android:textStyle="bold"
-            android:textColor="#12372a"
+            android:textColor="@color/text_primary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
@@ -115,7 +115,7 @@
                 android:layout_marginStart="8dp"/>
         </LinearLayout>
         <TextView
-            android:textColor="#49655a"
+            android:textColor="@color/text_secondary"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
@@ -139,7 +139,7 @@
                 android:layout_height="32dp"
                 android:contentDescription="@string/selected_colour_preview"/>
             <TextView
-                android:textColor="#49655a"
+                android:textColor="@color/text_secondary"
                 android:id="@+id/colorSelectionText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -147,7 +147,7 @@
                 android:layout_marginStart="10dp"/>
         </LinearLayout>
         <TextView
-            android:textColor="#49655a"
+            android:textColor="@color/text_secondary"
             android:id="@+id/brightnessText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -166,7 +166,7 @@
             android:text="@string/set_colour"/>
         <TextView
             android:textStyle="bold"
-            android:textColor="#12372a"
+            android:textColor="@color/text_primary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
@@ -191,21 +191,21 @@
             android:importantForAutofill="no"/>
         <TextView
             android:textStyle="bold"
-            android:textColor="#12372a"
+            android:textColor="@color/text_primary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:text="@string/script_heading"/>
         <TextView
             android:textSize="13sp"
-            android:textColor="#49655a"
+            android:textColor="@color/text_secondary"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/script_help"/>
         <EditText
             android:gravity="start|top"
             android:id="@+id/scriptEditor"
-            android:background="#ffffff"
+            android:background="?attr/editorBackground"
             android:padding="10dp"
             android:scrollbars="vertical"
             android:layout_width="match_parent"
@@ -260,8 +260,28 @@
                 android:layout_marginStart="8dp"/>
         </LinearLayout>
         <TextView
+            android:textStyle="bold"
+            android:textColor="@color/text_primary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/appearance"/>
+        <CheckBox
+            android:id="@+id/pureBlackCheckBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:saveEnabled="false"
+            android:text="@string/pure_black_dark_theme"/>
+        <TextView
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/pure_black_help"/>
+        <TextView
             android:textSize="12sp"
-            android:textColor="#6b3f24"
+            android:textColor="@color/warning_text"
             android:paddingBottom="16dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

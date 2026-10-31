@@ -1,12 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.BleMeshCtl" parent="@android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">#f7fbf8</item>
+    <!-- values-night/styles.xml swaps this base for the dark Material theme. -->
+    <style name="Base.Theme.BleMeshCtl" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <style name="Theme.BleMeshCtl" parent="Base.Theme.BleMeshCtl">
+        <item name="android:windowBackground">@color/window_background</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#006c4c</item>
-        <item name="android:statusBarColor">#e5f4ec</item>
-        <item name="android:navigationBarColor">#f7fbf8</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:statusBarColor">@color/status_background</item>
+        <item name="android:navigationBarColor">@color/window_background</item>
+        <item name="statusBackground">@color/status_background</item>
+        <item name="editorBackground">@color/editor_background</item>
+    </style>
+
+    <!-- Pure black for AMOLED screens; MainActivity applies it only in night mode. -->
+    <style name="Theme.BleMeshCtl.PureBlack">
+        <item name="android:windowBackground">@color/black_background</item>
+        <item name="android:colorBackground">@color/black_background</item>
+        <item name="android:statusBarColor">@color/black_background</item>
+        <item name="android:navigationBarColor">@color/black_background</item>
+        <item name="statusBackground">@color/black_surface</item>
+        <item name="editorBackground">@color/black_surface</item>
     </style>
 </resources>
