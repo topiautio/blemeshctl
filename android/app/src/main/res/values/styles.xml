@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.BleMeshCtl" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#f7fbf8</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#006c4c</item>
+        <item name="android:statusBarColor">#e5f4ec</item>
+        <item name="android:navigationBarColor">#f7fbf8</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
