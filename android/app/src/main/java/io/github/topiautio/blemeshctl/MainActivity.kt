@@ -11,6 +11,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.AdapterView
@@ -204,6 +205,21 @@ class MainActivity : Activity() {
         openScriptButton.setOnClickListener { openScriptFile() }
         runScriptButton.setOnClickListener { runScript() }
         stopScriptButton.setOnClickListener { stopScript() }
+        keepScriptDragsInEditor()
+    }
+
+    /** Let a script longer than the editor scroll inside it instead of moving the whole page. */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun keepScriptDragsInEditor() {
+        scriptEditor.setOnTouchListener { view, event ->
+            // ScrollView clears this request on every new touch, so asking on ACTION_DOWN is enough.
+            if (event.actionMasked == MotionEvent.ACTION_DOWN &&
+                (view.canScrollVertically(-1) || view.canScrollVertically(1))
+            ) {
+                view.parent?.requestDisallowInterceptTouchEvent(true)
+            }
+            false
+        }
     }
 
     private fun startScan() {
