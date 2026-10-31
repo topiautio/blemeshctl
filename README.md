@@ -1,19 +1,28 @@
 # blemeshctl
 
-`blemeshctl` controls legacy Telink BleMesh lights from a Linux command line.
-It was built and verified against a Briloner Control-compatible light advertising
-as `BleMesh`.
+`blemeshctl` controls legacy Telink BleMesh lights from the Linux command line.
+It was built and verified against a Briloner Control-compatible light that
+advertises as `BleMesh`.
 
-It supports only normal light controls: discovery, on, off, and solid RGB
-colour. It intentionally does not expose provisioning, factory-reset, or OTA
-commands. An [Android app](#android-app) with the same controls and script
-language lives in `android/`.
+It supports discovery, on, off, solid RGB colour, and simple animation
+scripts. It intentionally does not support provisioning, factory reset, or OTA
+firmware updates. An [Android app](#android-app) with the same controls and
+script language lives in `android/`.
 
-## Download
+## Install
 
-For 64-bit Linux, each tagged GitHub Release includes one standalone executable
-with Python and the required Python packages bundled inside. Download the latest
-build without cloning this repository:
+Every install method needs a working BlueZ Bluetooth stack and adapter. Check
+that Bluetooth is enabled before you start:
+
+```bash
+bluetoothctl show
+```
+
+### Standalone executable
+
+Each tagged GitHub Release includes a standalone executable for 64-bit Linux.
+It bundles Python and the required packages, so it does not need a Python
+installation:
 
 ```bash
 curl --fail --location \
@@ -23,78 +32,70 @@ chmod +x blemeshctl
 ./blemeshctl --help
 ```
 
-The executable still needs the host's normal GNU/Linux runtime, BlueZ service,
-and Bluetooth adapter. It does not require a Python installation. Builds are
-validated on Ubuntu 22.04 and should run on newer glibc-based x86_64 systems.
+It is built and tested on Ubuntu 22.04 and should run on newer glibc-based
+x86_64 systems.
 
-## Install
+### From source
 
-Python 3.10+ and a working BlueZ Bluetooth stack are required.
+Installing from source needs Python 3.10 or newer. Clone the repository first:
 
-### Recommended: `pipx`
+```bash
+git clone https://github.com/topiautio/blemeshctl.git
+cd blemeshctl
+```
 
-`pipx` keeps Python dependencies isolated but exposes `blemeshctl` directly on
-your normal shell `PATH`, so no virtual-environment activation is needed.
-
-On Arch-based distributions such as CachyOS, install it once:
+The recommended way to install is `pipx`. It isolates the Python dependencies
+but puts `blemeshctl` on your normal `PATH`, so you don't need to activate a
+virtual environment. Install `pipx` from your distribution; on Arch-based
+systems such as CachyOS:
 
 ```bash
 sudo pacman -S python-pipx
 pipx ensurepath
 ```
 
-Then, from a checkout of this repository, install the CLI:
+Then install the CLI from the checkout:
 
 ```bash
 pipx install --editable .
 blemeshctl scan
 ```
 
-Open a new shell after `pipx ensurepath` if `blemeshctl` is not immediately
-found. To update an editable checkout after changing dependencies, run
-`pipx reinstall blemeshctl`.
+Open a new shell if `blemeshctl` is not found right after `pipx ensurepath`.
+After changing dependencies, run `pipx reinstall blemeshctl`.
 
-### Development fallback
+To use a plain virtual environment instead:
 
 ```bash
-git clone https://github.com/topiautio/blemeshctl.git
-cd blemeshctl
 python -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/blemeshctl scan
 ```
 
-On Linux, first confirm that Bluetooth is enabled and the target is visible:
+## Usage
 
-```bash
-bluetoothctl show
-blemeshctl scan
-```
-
-## Use
-
-Discovery prints the Bluetooth MAC address, advertised Telink mesh address,
-product ID, and raw status byte:
+`scan` lists nearby compatible lights with their Bluetooth MAC address,
+advertised Telink mesh address, product ID, and raw status byte:
 
 ```bash
 blemeshctl scan
 ```
 
-Control an explicitly selected device:
+Control a light by its MAC address:
 
 ```bash
 blemeshctl on --address A4:C1:38:93:1B:72
 blemeshctl color 00ff00 --address A4:C1:38:93:1B:72
+blemeshctl color '#00ff00' --brightness 65 --address A4:C1:38:93:1B:72
 blemeshctl off --address A4:C1:38:93:1B:72
 ```
 
-When there is exactly one compatible advertisement, `--address` may be omitted.
-The CLI obtains the mesh address from the current advertisement rather than
-requiring it to be hard-coded.
+`--brightness` takes a value from 1 through 100. If exactly one compatible
+light is advertising, `--address` may be omitted. The mesh address is read
+from the light's current advertisement, so it doesn't need to be configured.
 
-For the Briloner-compatible light this project was tested with, the application
-credentials were `BleMesh` and `mesh123`; those are the defaults. Override
-them for another mesh:
+The default mesh credentials are `BleMesh` and `mesh123`, which the tested
+Briloner-compatible light uses. Override them for another mesh:
 
 ```bash
 blemeshctl on \
@@ -103,18 +104,13 @@ blemeshctl on \
   --password MyPassword
 ```
 
-Set colour brightness independently (1 through 100):
+### Retained connections
 
-```bash
-blemeshctl color '#00ff00' --brightness 65 --address A4:C1:38:93:1B:72
-```
-
-## Fast repeated controls
-
-The first control command has to wait for the light to advertise, connect, and
-authenticate. After that, `blemeshctl` automatically keeps the authenticated
-connection open for 60 seconds after the last command. A new `on`, `off`, or
-`color` command for the same address reuses it and resets the one-minute timer:
+The first command has to wait for the light to advertise, connect, and
+authenticate. After that, `blemeshctl` keeps the authenticated connection open
+for 60 seconds after the last command. Another `on`, `off`, or `color` command
+for the same address reuses it and resets the timer, so repeated commands are
+fast:
 
 ```bash
 blemeshctl color ff0000 --address A4:C1:38:93:1B:72
@@ -122,49 +118,48 @@ blemeshctl color 00ff00 --address A4:C1:38:93:1B:72
 blemeshctl color 0000ff --address A4:C1:38:93:1B:72
 ```
 
-The connection runs in a private per-user Unix socket under
-`$XDG_RUNTIME_DIR` and closes automatically when idle. Inspect or close it
-explicitly when useful:
+The connection is held by a small per-user daemon behind a private Unix socket
+under `$XDG_RUNTIME_DIR`. It exits on its own when idle. To inspect or close it
+explicitly:
 
 ```bash
 blemeshctl daemon status --address A4:C1:38:93:1B:72
 blemeshctl daemon stop --address A4:C1:38:93:1B:72
 ```
 
-Use `--keepalive-seconds 0` to close the retained connection immediately after
-one command, or choose another value up to one hour.
+`--keepalive-seconds` sets the idle time, up to one hour. Use
+`--keepalive-seconds 0` to close the connection right after the command.
+
+### Waiting for an unavailable light
+
+By default, `on`, `off`, and `color` fail at once if the light is not
+advertising or the initial Bluetooth connection fails. Add
+`--wait-for-connection` together with `--address` to keep retrying instead;
+press `Ctrl-C` to stop waiting. Scripts wait by default when given an
+`--address`; use `--no-wait-for-connection` to make them fail fast.
+
+If the link drops after a command was sent, that command is not retried,
+because its outcome is unknown.
 
 ## Scripts
 
-For animations or repeatable scenes, put normal light controls in a text file
-and run it with `blemeshctl script scriptname`. The shipped
+For animations or repeatable scenes, put light controls in a text file and run
+it with `blemeshctl script`. The bundled
 [red, green, blue example](examples/rgb-cycle.blemesh) and
 [saturated rainbow example](examples/rainbow.blemesh) both loop until
-interrupted:
+interrupted with `Ctrl-C`:
 
 ```bash
 blemeshctl script examples/rgb-cycle.blemesh --address A4:C1:38:93:1B:72
 blemeshctl script examples/rainbow.blemesh --address A4:C1:38:93:1B:72
 ```
 
-Use `--address` for scripts whenever possible: `BleMesh` is a generic device
-name, and an endless animation should target the intended light explicitly.
-The same mesh credentials, scan timeouts, and keepalive settings as regular
-commands remain CLI options, so script files are portable and do not contain
-passwords.
+Mesh credentials, timeouts, and keepalive settings stay command-line options,
+so script files are portable and contain no passwords.
 
-Scripts with an explicit `--address` wait and retry by default when that light
-is temporarily not advertising or cannot complete its initial Bluetooth
-connection. Press `Ctrl-C` to stop waiting, or use `--no-wait-for-connection`
-for fail-fast behaviour. Normal `on`, `off`, and `color` commands remain
-fail-fast by default; give them `--wait-for-connection` with `--address` when
-the light may be temporarily unavailable. A link that drops after a command
-was sent is not retried automatically, because that command's outcome is
-unknown.
-
-Scripts are deliberately a small declarative format, not shell or Python.
-The complete file is validated before its first command is sent. Blank lines
-and lines beginning with `#` are ignored. Blocks use spaces for indentation:
+Scripts are a small declarative format, not shell or Python. The whole file is
+validated before the first command is sent. Blank lines and lines beginning
+with `#` are ignored, and blocks are indented with spaces:
 
 ```text
 on
@@ -177,56 +172,104 @@ loop:
   wait 1s
 ```
 
-Available instructions are `on`, `off`, `color RRGGBB [brightness]`,
-`wait duration`, `rainbow duration`, `repeat N:`, and `loop:`. A duration is a
-positive number of seconds, or may end in `ms`, `s`, or `m`; for example,
-`0.5`, `250ms`, `1s`, or `2m`. `repeat N:` runs its indented block a fixed
-number of times, while `loop:` repeats forever. Stop an endless loop with
-`Ctrl-C`.
+| Instruction | Effect |
+| --- | --- |
+| `on`, `off` | Turn the light on or off |
+| `color RRGGBB [brightness]` | Set a solid colour, optionally with brightness 1–100 |
+| `wait duration` | Pause |
+| `rainbow duration` | Sweep through the saturated colour wheel, holding each step for `duration` |
+| `repeat N:` | Run the indented block `N` times |
+| `loop:` | Run the indented block forever |
 
-`rainbow 100ms` is a gaming-style sweep through all 1,530 distinct fully
-saturated 8-bit RGB hue steps: red through the colour wheel and back to red.
-It deliberately excludes white and pastels. The full non-white RGB space has
-16,777,215 values and would take about 19 days at 100 ms per colour, so that
-is not practical for an animation. One saturated `rainbow 100ms` sweep takes
-at least 153 seconds; Bluetooth command time can make it longer. The 100 ms
-wait starts after each command finishes, so it is a minimum dwell rather than
-a guaranteed hardware update rate.
+A duration is a positive number of seconds, optionally ending in `ms`, `s`, or
+`m`; for example `0.5`, `250ms`, `1s`, or `2m`.
 
-Each action uses the existing per-address keepalive daemon, so the first one
-opens and authenticates the Bluetooth connection and later actions reuse it.
-If a `wait` is at least as long as `--keepalive-seconds` (60 seconds by
-default), the next action will reconnect naturally; raise that option for
+`rainbow` steps through all 1,530 distinct fully saturated 8-bit RGB hues, from
+red around the colour wheel and back to red, without white or pastels. One
+`rainbow 100ms` sweep takes at least 153 seconds. The wait starts after each
+command finishes, so the duration is a minimum dwell time, not a guaranteed
+update rate.
+
+Every action reuses the retained connection. If a `wait` is at least as long
+as `--keepalive-seconds`, the next action reconnects; raise that option for
 longer pauses.
 
 ## Android app
 
 The `android/` directory holds a native Android app that uses the same Telink
-protocol, `.blemesh` script language, and safety limits as the CLI. It scans for
-compatible lights, remembers the last one used and connects to it ahead of
+protocol, `.blemesh` script language, and safety limits as the CLI. It scans
+for compatible lights, remembers the last one used and connects to it ahead of
 time, and offers on, off, a colour wheel with brightness, and a script editor
 with the two bundled examples. Scripts run only while the app is in the
 foreground. The interface is in Finnish and follows the system dark theme on
-Android 10 and newer; an Appearance (Ulkoasu) option switches that dark theme
+Android 10 and newer; the Appearance (Ulkoasu) option switches the dark theme
 to pure black for AMOLED screens.
 
-It needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask for
-the Nearby devices permission; older versions ask for location instead, which
-Android requires for Bluetooth scanning.
+The app needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask
+for the Nearby devices permission; older versions ask for location instead,
+which Android requires for Bluetooth scanning.
 
 Signed APKs are attached to GitHub Releases whose tags start with `android-v`,
-for example `android-v0.4.0`. Those releases are not marked as the latest
-release, so the Linux download link above keeps pointing at the CLI. Download
-the APK on the phone from the repository's Releases page and open it.
+for example `android-v0.4.0`. These releases are not marked as latest, so the
+Linux download link above keeps pointing at the CLI. Download the APK on the
+phone from the repository's Releases page and open it.
 
-Android updates an installed app only with a build signed by the same key. If a
-build signed with another key is installed, such as a local debug build,
+Android only updates an installed app with a build signed by the same key. If
+a build signed with a different key is installed, such as a local debug build,
 uninstall it first. That also clears its remembered light, mesh credentials,
 and script.
 
-### Build and release the Android app
+## How it works
 
-Building needs JDK 17 or newer and Android SDK platform 37 (`platforms;android-37.0`):
+This is a legacy proprietary Telink mesh protocol, not Bluetooth SIG Mesh. The
+light does not need Bluetooth pairing, but it does require an
+application-level AES challenge/response login. `blemeshctl` performs that
+login when it connects, derives a session key, and sends encrypted vendor
+commands to the mesh address the light advertises.
+
+The command encryption is implemented in Python, and again in Kotlin for the
+Android app. Both are tested against the same known output vector from
+Telink's native library, and neither needs the vendor's APK or Android shared
+library at runtime.
+
+## Safety notes
+
+- `BleMesh` is a generic device name. Use `scan`, check the MAC address and
+  signal level, and pass `--address` whenever more than one light may be
+  nearby. This matters most for endless script animations.
+- The advertised status byte is reported verbatim. Treat it as a diagnostic
+  hint, not a reliable readback of colour or power state.
+- Provisioning and firmware-update workflows are untested and deliberately not
+  implemented.
+
+## Development
+
+### Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The unit tests cover advertisement parsing, authentication key derivation,
+the command-frame layout, the Telink command-encryption test vector, script
+parsing and execution, retained GATT sessions, and the daemon's socket and
+idle-timeout lifecycle. They need no Bluetooth hardware.
+
+### Standalone executable
+
+Build and smoke-test the same one-file executable that GitHub Actions
+produces:
+
+```bash
+.venv/bin/pip install -e '.[standalone]'
+.venv/bin/python -m PyInstaller --clean --noconfirm blemeshctl.spec
+scripts/smoke-standalone.sh dist/blemeshctl
+```
+
+### Android app
+
+Building needs JDK 17 or newer and Android SDK platform 37
+(`platforms;android-37.0`):
 
 ```bash
 cd android
@@ -237,86 +280,7 @@ The debug APK is written to `android/app/build/outputs/apk/debug/`. The unit
 tests reuse the Python protocol test vectors and parse the scripts in
 `examples/`.
 
-Releases are signed in GitHub Actions with a key kept in repository secrets.
-Create the key once, outside the repository:
+### Releases
 
-```bash
-keytool -genkeypair -keystore blemeshctl-release.jks -storetype PKCS12 \
-  -alias blemeshctl -keyalg RSA -keysize 4096 -validity 10000 \
-  -dname "CN=blemeshctl"
-base64 -w0 blemeshctl-release.jks > blemeshctl-release.jks.base64
-```
-
-Then add these secrets under the repository's Settings, Secrets and variables,
-Actions:
-
-| Secret | Value |
-| --- | --- |
-| `ANDROID_KEYSTORE_BASE64` | Contents of `blemeshctl-release.jks.base64` |
-| `ANDROID_KEYSTORE_PASSWORD` | The keystore password |
-| `ANDROID_KEY_ALIAS` | `blemeshctl` |
-| `ANDROID_KEY_PASSWORD` | The keystore password again; PKCS12 keys share it |
-
-Back up `blemeshctl-release.jks` and its password somewhere safe. Every later
-update must be signed with the same key, and a lost key means users must
-uninstall the app to install a new one.
-
-To publish a release, set `versionCode` and `versionName` in
-`android/app/build.gradle.kts`, merge the change to `main`, and push a matching
-tag:
-
-```bash
-git tag android-v0.4.0
-git push origin android-v0.4.0
-```
-
-The workflow refuses to publish when the tag does not match `versionName`, when
-a signing secret is missing, or when the APK is debuggable. Pull requests that
-touch `android/` and pushes to `main` keep a debug APK as a workflow artifact.
-
-## How it works
-
-This is a legacy proprietary Telink mesh protocol, not Bluetooth SIG Mesh.
-The device does not require Bluetooth pairing, but it does require an
-application-level AES challenge/response login. `blemeshctl` performs that
-login when it opens a connection, derives a session key, and sends encrypted
-vendor commands to the mesh address advertised by the target. The local
-keepalive daemon retains that GATT connection only for normal light controls;
-it does not expose provisioning, reset, or OTA operations.
-
-The command encryption is implemented in Python, and again in Kotlin for the
-Android app; both are tested against the same known Telink native-library
-output vector. Neither needs the vendor's APK or Android shared library at
-runtime.
-
-## Test
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-The unit tests cover advertisement parsing, authentication key derivation,
-the command-frame layout, the Telink command-encryption test vector, script
-parsing and execution, retained GATT sessions, and the daemon's socket and
-idle-timeout lifecycle.
-
-Build and smoke-test the same one-file executable produced by GitHub Actions:
-
-```bash
-.venv/bin/pip install -e '.[standalone]'
-.venv/bin/python -m PyInstaller --clean --noconfirm blemeshctl.spec
-scripts/smoke-standalone.sh dist/blemeshctl
-```
-
-Pull requests and pushes to `main` retain the verified executable as a workflow
-artifact. Pushing a version tag such as `v0.1.0` also creates a GitHub Release
-and attaches it as `blemeshctl-linux-x86_64`.
-
-## Safety notes
-
-- A device name such as `BleMesh` is generic. Use `scan`, check the MAC and
-  signal level, then prefer `--address` when more than one device is nearby.
-- The advertised status byte is reported verbatim. Treat it as a diagnostic
-  hint, not a complete colour/state readback.
-- This project has not been tested with provisioning or firmware-update
-  workflows; it deliberately does not implement them.
+See [RELEASING.md](RELEASING.md) for publishing the Linux executable and the
+signed Android APK, including the one-time signing-key setup.
