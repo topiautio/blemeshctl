@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Backgrounds that the pure black theme replaces; text colours stay in colors.xml. -->
+    <attr name="statusBackground" format="color|reference" />
+    <attr name="editorBackground" format="color|reference" />
+</resources>

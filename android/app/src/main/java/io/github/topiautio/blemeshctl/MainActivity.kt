@@ -8,14 +8,17 @@ import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.SeekBar
@@ -87,8 +90,14 @@ class MainActivity : Activity() {
     private lateinit var openScriptButton: Button
     private lateinit var runScriptButton: Button
     private lateinit var stopScriptButton: Button
+    private lateinit var pureBlackCheckBox: CheckBox
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The window background and system bar colours are read when the decor is
+        // installed, so the theme has to be chosen before the activity is created.
+        if (isNightMode() && getSharedPreferences(PREFERENCES, MODE_PRIVATE).getBoolean(PREF_PURE_BLACK, false)) {
+            setTheme(R.style.Theme_BleMeshCtl_PureBlack)
+        }
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         bindViews()
@@ -141,6 +150,7 @@ class MainActivity : Activity() {
         openScriptButton = findViewById(R.id.openScriptButton)
         runScriptButton = findViewById(R.id.runScriptButton)
         stopScriptButton = findViewById(R.id.stopScriptButton)
+        pureBlackCheckBox = findViewById(R.id.pureBlackCheckBox)
     }
 
     private fun configureBluetooth() {
@@ -204,6 +214,26 @@ class MainActivity : Activity() {
         openScriptButton.setOnClickListener { openScriptFile() }
         runScriptButton.setOnClickListener { runScript() }
         stopScriptButton.setOnClickListener { stopScript() }
+        keepScriptDragsInEditor()
+        pureBlackCheckBox.setOnCheckedChangeListener { _, checked ->
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putBoolean(PREF_PURE_BLACK, checked).apply()
+            // Recreating ends the warm connection, so setBusy() keeps this disabled during commands.
+            if (isNightMode()) recreate()
+        }
+    }
+
+    /** Let a script longer than the editor scroll inside it instead of moving the whole page. */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun keepScriptDragsInEditor() {
+        scriptEditor.setOnTouchListener { view, event ->
+            // ScrollView clears this request on every new touch, so asking on ACTION_DOWN is enough.
+            if (event.actionMasked == MotionEvent.ACTION_DOWN &&
+                (view.canScrollVertically(-1) || view.canScrollVertically(1))
+            ) {
+                view.parent?.requestDisallowInterceptTouchEvent(true)
+            }
+            false
+        }
     }
 
     private fun startScan() {
@@ -514,6 +544,7 @@ class MainActivity : Activity() {
         openScriptButton.isEnabled = enabled
         runScriptButton.isEnabled = enabled
         stopScriptButton.isEnabled = busy && scriptRunning
+        pureBlackCheckBox.isEnabled = enabled
     }
 
     private fun updateProgressVisibility() {
@@ -728,6 +759,7 @@ class MainActivity : Activity() {
         }
 
         preferences.getString(PREF_SCRIPT, null)?.let { scriptEditor.setText(it) }
+        pureBlackCheckBox.isChecked = preferences.getBoolean(PREF_PURE_BLACK, false)
     }
 
     private fun saveInputs() {
@@ -741,6 +773,9 @@ class MainActivity : Activity() {
             .putString(PREF_SCRIPT, scriptEditor.text.toString().take(MAX_SCRIPT_CHARACTERS))
             .apply()
     }
+
+    private fun isNightMode(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
     private fun hex(value: Int): String = value.toString(16).padStart(2, '0').lowercase(Locale.ROOT)
 
@@ -759,6 +794,7 @@ class MainActivity : Activity() {
         const val PREF_LIGHT_STATUS = "light_status"
         const val PREF_MESH_NAME = "mesh_name"
         const val PREF_PASSWORD = "password"
+        const val PREF_PURE_BLACK = "pure_black"
         const val PREF_SCRIPT = "script"
         const val REQUEST_BLUETOOTH_PERMISSIONS = 100
         const val REQUEST_ENABLE_BLUETOOTH = 101

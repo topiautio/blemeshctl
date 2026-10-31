@@ -206,14 +206,16 @@ protocol, `.blemesh` script language, and safety limits as the CLI. It scans for
 compatible lights, remembers the last one used and connects to it ahead of
 time, and offers on, off, a colour wheel with brightness, and a script editor
 with the two bundled examples. Scripts run only while the app is in the
-foreground. The interface is in Finnish.
+foreground. The interface is in Finnish and follows the system dark theme on
+Android 10 and newer; an Appearance (Ulkoasu) option switches that dark theme
+to pure black for AMOLED screens.
 
 It needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask for
 the Nearby devices permission; older versions ask for location instead, which
 Android requires for Bluetooth scanning.
 
 Signed APKs are attached to GitHub Releases whose tags start with `android-v`,
-for example `android-v0.3.1`. Those releases are not marked as the latest
+for example `android-v0.4.0`. Those releases are not marked as the latest
 release, so the Linux download link above keeps pointing at the CLI. Download
 the APK on the phone from the repository's Releases page and open it.
 
@@ -264,8 +266,8 @@ To publish a release, set `versionCode` and `versionName` in
 tag:
 
 ```bash
-git tag android-v0.3.1
-git push origin android-v0.3.1
+git tag android-v0.4.0
+git push origin android-v0.4.0
 ```
 
 The workflow refuses to publish when the tag does not match `versionName`, when

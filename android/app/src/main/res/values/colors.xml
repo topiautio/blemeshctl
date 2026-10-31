@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Every colour here needs a dark counterpart in values-night/colors.xml. -->
+    <color name="window_background">#f7fbf8</color>
+    <color name="status_background">#e5f4ec</color>
+    <color name="editor_background">#ffffff</color>
+    <color name="text_primary">#12372a</color>
+    <color name="text_secondary">#49655a</color>
+    <color name="warning_text">#6b3f24</color>
+    <color name="accent">#006c4c</color>
+</resources>
