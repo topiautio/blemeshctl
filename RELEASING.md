@@ -7,7 +7,7 @@ pushes to `main` keep a debug APK.
 
 ## Linux executable
 
-Push a version tag such as `v0.1.0`. The workflow creates a GitHub Release and
+Push a version tag such as `v0.2.0`. The workflow creates a GitHub Release and
 attaches the executable as `blemeshctl-linux-x86_64`.
 
 ## Android app
@@ -48,8 +48,8 @@ Set `versionCode` and `versionName` in `android/app/build.gradle.kts`, merge
 the change to `main`, and push a matching tag:
 
 ```bash
-git tag android-v0.4.0
-git push origin android-v0.4.0
+git tag android-v0.5.0
+git push origin android-v0.5.0
 ```
 
 The workflow refuses to publish when the tag does not match `versionName`,

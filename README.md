@@ -236,7 +236,7 @@ for the Nearby devices permission; older versions ask for location instead,
 which Android requires for Bluetooth scanning.
 
 Signed APKs are attached to GitHub Releases whose tags start with `android-v`,
-for example `android-v0.4.0`. These releases are not marked as latest, so the
+for example `android-v0.5.0`. These releases are not marked as latest, so the
 Linux download link above keeps pointing at the CLI. Download the APK on the
 phone from the repository's Releases page and open it.
 
