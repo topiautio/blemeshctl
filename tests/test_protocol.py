@@ -4,6 +4,7 @@ import unittest
 
 from blemeshctl.protocol import (
     COMMAND_ON_OFF,
+    TelinkProtocolError,
     build_command_frame,
     build_pair_request,
     credentials,
@@ -12,7 +13,19 @@ from blemeshctl.protocol import (
     java_aes_encrypt,
     parse_advertisement,
     rgb_parameters,
+    white_channels,
+    white_parameters,
 )
+
+# Shared with android/app/src/test/.../TelinkProtocolTest.kt.
+WHITE_CHANNEL_VECTORS = {
+    2700: (255, 0),
+    3000: (255, 40),
+    4600: (255, 255),
+    4601: (254, 255),
+    5000: (201, 255),
+    6500: (0, 255),
+}
 
 
 class AdvertisementTests(unittest.TestCase):
@@ -71,6 +84,20 @@ class CommandTests(unittest.TestCase):
 
     def test_rgb_parameters(self) -> None:
         self.assertEqual(rgb_parameters(0, 255, 0, 100), bytes((100, 0, 255, 0, 0, 0, 0, 0)))
+
+    def test_white_channels_follow_colour_temperature(self) -> None:
+        for temperature, channels in WHITE_CHANNEL_VECTORS.items():
+            with self.subTest(temperature=temperature):
+                self.assertEqual(white_channels(temperature), channels)
+
+    def test_white_parameters_drive_only_the_white_channels(self) -> None:
+        self.assertEqual(white_parameters(4600, 100).hex(), "64000000ffff0000")
+        self.assertEqual(white_parameters(2700, 60).hex(), "3c000000ff000000")
+        for temperature, brightness in ((2699, 100), (6501, 100), (4600, 0), (4600, 101)):
+            with self.subTest(temperature=temperature, brightness=brightness), self.assertRaises(
+                TelinkProtocolError
+            ):
+                white_parameters(temperature, brightness)
 
 
 if __name__ == "__main__":

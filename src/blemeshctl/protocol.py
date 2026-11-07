@@ -15,6 +15,12 @@ PAIR_REQUEST_OPCODE = 0x0C
 PAIR_RESPONSE_OPCODE = 0x0D
 COMMAND_ON_OFF = 0xF0
 COMMAND_RGB = 0xF1
+# White light uses the same light-attribute opcode as RGB; only the payload differs.
+COMMAND_WHITE = COMMAND_RGB
+
+WHITE_WARMEST_KELVIN = 2700
+WHITE_NEUTRAL_KELVIN = 4600
+WHITE_COOLEST_KELVIN = 6500
 
 
 class TelinkProtocolError(ValueError):
@@ -229,3 +235,35 @@ def rgb_parameters(red: int, green: int, blue: int, brightness: int) -> bytes:
         if not 0 <= channel <= 255:
             raise TelinkProtocolError(f"{channel_name} must be from 0 through 255")
     return bytes((brightness, red, green, blue, 0, 0, 0, 0))
+
+
+def white_channels(temperature: int) -> tuple[int, int]:
+    """Return the ``(warm, cold)`` white LED levels for a temperature in kelvin.
+
+    Both channels are at full at 4600 K. Warmer temperatures dim the cold
+    channel and cooler ones dim the warm channel, each reaching zero at 2700 K
+    or 6500 K.
+    """
+
+    if not WHITE_WARMEST_KELVIN <= temperature <= WHITE_COOLEST_KELVIN:
+        raise TelinkProtocolError(
+            f"colour temperature must be from {WHITE_WARMEST_KELVIN} K through {WHITE_COOLEST_KELVIN} K"
+        )
+    if temperature > WHITE_NEUTRAL_KELVIN:
+        span = WHITE_COOLEST_KELVIN - WHITE_NEUTRAL_KELVIN
+        return (WHITE_COOLEST_KELVIN - temperature) * 255 // span, 255
+    span = WHITE_NEUTRAL_KELVIN - WHITE_WARMEST_KELVIN
+    return 255, (temperature - WHITE_WARMEST_KELVIN) * 255 // span
+
+
+def white_parameters(temperature: int, brightness: int) -> bytes:
+    """Build the white-LED parameter payload used by opcode ``0xF1``.
+
+    The RGB channels are zero, and bytes 4 and 5 drive the warm and cold white
+    LEDs. This is the layout telinkpp documents for Briloner Control lights.
+    """
+
+    if not 1 <= brightness <= 100:
+        raise TelinkProtocolError("brightness must be from 1 through 100")
+    warm, cold = white_channels(temperature)
+    return bytes((brightness, 0, 0, 0, warm, cold, 0, 0))

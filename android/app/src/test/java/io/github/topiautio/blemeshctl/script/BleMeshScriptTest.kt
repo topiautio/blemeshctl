@@ -80,6 +80,23 @@ class ScriptParserTests {
     }
 
     @Test
+    fun whiteTakesOptionalTemperatureThenBrightness() {
+        // The same cases as tests/test_script.py.
+        val cases = mapOf(
+            "white" to ("white 4600 K, brightness 100" to "64000000ffff0000"),
+            "white 60" to ("white 4600 K, brightness 60" to "3c000000ffff0000"),
+            "white 2700K" to ("white 2700 K, brightness 100" to "64000000ff000000"),
+            "white 5000k 60" to ("white 5000 K, brightness 60" to "3c000000c9ff0000"),
+        )
+        for ((text, expected) in cases) {
+            val command = BleMeshScript.parse(text, "white.blemesh").single() as LightCommand
+            assertEquals(text, TelinkProtocol.COMMAND_WHITE, command.opcode)
+            assertEquals(text, expected.first, command.description)
+            assertEquals(text, expected.second, command.parameters.joinToString("") { "%02x".format(it) })
+        }
+    }
+
+    @Test
     fun rejectsInvalidScriptsWithASourceLine() {
         val cases = mapOf(
             "color ff0000\nunknown" to "unknown instruction",
@@ -94,6 +111,14 @@ class ScriptParserTests {
             "loop\n  on" to "loop blocks must be written as 'loop:'",
             "wait 1s" to "script contains no light commands",
             "# only a comment" to "script contains no instructions",
+            "white 60 2700K" to "white takes an optional temperature",
+            "white 2700K 60 1" to "white takes an optional temperature",
+            "white 27O0K" to "whole kelvin",
+            "white K" to "whole kelvin",
+            "white 2699K" to "colour temperature must be from 2700 K through 6500 K",
+            "white 99999999999K" to "colour temperature must be from 2700 K through 6500 K",
+            "white 4600K 0" to "brightness must be from 1 through 100",
+            "white bright" to "brightness must be an integer",
         )
         for ((text, expected) in cases) {
             val error = assertThrows(ScriptException::class.java) { BleMeshScript.parse(text, "bad.blemesh") }

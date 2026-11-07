@@ -38,7 +38,7 @@ data class LoopStep(override val line: Int, val count: Int?, val body: List<Scri
 /**
  * Parser and executor for the same `.blemesh` language as the command-line tool.
  *
- * The format intentionally exposes only ordinary on, off, and RGB controls. It
+ * The format intentionally exposes only ordinary on, off, RGB, and white controls. It
  * never evaluates code, raw Telink packets, or other arbitrary input.
  */
 object BleMeshScript {
@@ -208,6 +208,7 @@ object BleMeshScript {
                     LightCommand(line.number, "off", TelinkProtocol.COMMAND_ON_OFF, TelinkProtocol.offParameters())
                 }
                 "color" -> parseColor(line, words)
+                "white" -> parseWhite(line, words)
                 "wait" -> {
                     if (words.size != 2) throw error(line, "wait requires one positive duration")
                     WaitStep(line.number, parseDuration(words[1], line))
@@ -249,6 +250,41 @@ object BleMeshScript {
                 line.number,
                 "colour rgb #${rgb.red.hex()}${rgb.green.hex()}${rgb.blue.hex()}, brightness $brightness",
                 TelinkProtocol.COMMAND_RGB,
+                parameters,
+            )
+        }
+
+        private fun parseWhite(line: SourceLine, words: List<String>): LightCommand {
+            val arguments = words.drop(1)
+            val usage = "white takes an optional temperature such as 2700K, then an optional brightness from 1 through 100"
+            if (arguments.size > 2) throw error(line, usage)
+            var next = 0
+            var temperature = TelinkProtocol.WHITE_NEUTRAL_KELVIN
+            val first = arguments.firstOrNull()
+            if (first != null && (first.endsWith("K") || first.endsWith("k"))) {
+                next++
+                val kelvin = first.dropLast(1)
+                if (kelvin.isEmpty() || !kelvin.all { it in '0'..'9' }) {
+                    throw error(line, "white temperature must be whole kelvin such as 2700K")
+                }
+                // Digits too long for an Int are still out of range, not malformed.
+                temperature = kelvin.toIntOrNull() ?: Int.MAX_VALUE
+            }
+            var brightness = 100
+            if (next < arguments.size) {
+                brightness = arguments[next++].toIntOrNull()
+                    ?: throw error(line, "brightness must be an integer from 1 through 100")
+            }
+            if (next < arguments.size) throw error(line, usage)
+            val parameters = try {
+                TelinkProtocol.whiteParameters(temperature, brightness)
+            } catch (exception: TelinkProtocolException) {
+                throw error(line, exception.message ?: "invalid white light")
+            }
+            return LightCommand(
+                line.number,
+                "white $temperature K, brightness $brightness",
+                TelinkProtocol.COMMAND_WHITE,
                 parameters,
             )
         }

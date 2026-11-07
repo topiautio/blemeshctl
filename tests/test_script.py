@@ -10,7 +10,14 @@ from unittest.mock import AsyncMock, patch
 
 from blemeshctl.cli import build_parser, run
 from blemeshctl.daemon import DaemonError
-from blemeshctl.protocol import COMMAND_ON_OFF, COMMAND_RGB, on_parameters, rgb_parameters
+from blemeshctl.protocol import (
+    COMMAND_ON_OFF,
+    COMMAND_RGB,
+    COMMAND_WHITE,
+    TelinkProtocolError,
+    on_parameters,
+    rgb_parameters,
+)
 from blemeshctl.script import (
     RAINBOW_COLORS,
     Delay,
@@ -75,6 +82,22 @@ class ScriptParserTests(unittest.TestCase):
         self.assertEqual(repeat.body[0].parameters, rgb_parameters(0, 255, 0, 65))
         self.assertEqual(repeat.body[1], Delay(5, 0.25))
 
+    def test_white_takes_optional_temperature_then_brightness(self) -> None:
+        # Shared with android/app/src/test/.../BleMeshScriptTest.kt.
+        cases = {
+            "white": ("white 4600 K, brightness 100", "64000000ffff0000"),
+            "white 60": ("white 4600 K, brightness 60", "3c000000ffff0000"),
+            "white 2700K": ("white 2700 K, brightness 100", "64000000ff000000"),
+            "white 5000k 60": ("white 5000 K, brightness 60", "3c000000c9ff0000"),
+        }
+        for text, (description, parameters) in cases.items():
+            with self.subTest(text=text):
+                (command,) = parse_script(text)
+                self.assertIsInstance(command, LightCommand)
+                self.assertEqual(command.opcode, COMMAND_WHITE)
+                self.assertEqual(command.description, description)
+                self.assertEqual(command.parameters.hex(), parameters)
+
     def test_rejects_invalid_scripts_with_a_source_line(self) -> None:
         cases = {
             "color ff0000\nunknown": "unknown instruction",
@@ -84,6 +107,14 @@ class ScriptParserTests(unittest.TestCase):
             "color gg0000": "only hexadecimal digits",
             "wait 0": "wait must be a positive, finite duration",
             "rainbow 0": "wait must be a positive, finite duration",
+            "white 60 2700K": "white takes an optional temperature",
+            "white 2700K 60 1": "white takes an optional temperature",
+            "white 27O0K": "whole kelvin",
+            "white K": "whole kelvin",
+            "white 2699K": "colour temperature must be from 2700 K through 6500 K",
+            "white 99999999999K": "colour temperature must be from 2700 K through 6500 K",
+            "white 4600K 0": "brightness must be from 1 through 100",
+            "white bright": "brightness must be an integer",
         }
         for text, expected in cases.items():
             with self.subTest(text=text), self.assertRaisesRegex(
@@ -230,6 +261,52 @@ class ScriptCliTests(unittest.TestCase):
         self.assertEqual(
             request.await_args.args[0]["parameters"], rgb_parameters(0, 255, 0, 100).hex()
         )
+
+    def test_regular_white_command_sends_white_parameters(self) -> None:
+        arguments = build_parser().parse_args(
+            ["white", "--temperature", "2700", "--brightness", "60", "--address", ADDRESS]
+        )
+        socket_path = Path("/tmp/blemeshctl-white-test.sock")
+        request = AsyncMock(
+            return_value={"address": ADDRESS, "mesh_address": 0x67, "reused": False, "idle_timeout": 60.0}
+        )
+        with (
+            patch("blemeshctl.cli.socket_path_for_address", return_value=socket_path),
+            patch("blemeshctl.cli.request_daemon", new=request),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            result = asyncio.run(run(arguments))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(request.await_args.args[0]["opcode"], COMMAND_WHITE)
+        self.assertEqual(request.await_args.args[0]["parameters"], "3c000000ff000000")
+        self.assertIn("white 2700 K, brightness 60 command sent", output.getvalue())
+
+    def test_white_command_defaults_to_both_white_channels_at_full(self) -> None:
+        arguments = build_parser().parse_args(["white", "--address", ADDRESS])
+        request = AsyncMock(
+            return_value={"address": ADDRESS, "mesh_address": 0x67, "reused": False, "idle_timeout": 60.0}
+        )
+        with (
+            patch("blemeshctl.cli.socket_path_for_address", return_value=Path("/tmp/blemeshctl-white-test.sock")),
+            patch("blemeshctl.cli.request_daemon", new=request),
+            redirect_stdout(io.StringIO()),
+        ):
+            asyncio.run(run(arguments))
+
+        self.assertEqual(request.await_args.args[0]["parameters"], "64000000ffff0000")
+
+    def test_out_of_range_white_command_makes_no_daemon_request(self) -> None:
+        arguments = build_parser().parse_args(["white", "--temperature", "9000", "--address", ADDRESS])
+        request = AsyncMock()
+        with (
+            patch("blemeshctl.cli.socket_path_for_address", return_value=Path("/tmp/blemeshctl-white-test.sock")),
+            patch("blemeshctl.cli.request_daemon", new=request),
+            self.assertRaisesRegex(TelinkProtocolError, "colour temperature"),
+        ):
+            asyncio.run(run(arguments))
+
+        request.assert_not_awaited()
 
     def test_script_sends_commands_sequentially_to_the_same_daemon(self) -> None:
         content = """on
