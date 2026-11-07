@@ -10,6 +10,9 @@ class TelinkProtocolException(message: String) : IllegalArgumentException(messag
 
 data class Rgb(val red: Int, val green: Int, val blue: Int)
 
+/** Warm and cold white LED levels, each from 0 through 255. */
+data class WhiteChannels(val warm: Int, val cold: Int)
+
 /** A Telink pairing request and the local random value needed to verify its response. */
 data class PairRequest(val bytes: ByteArray, val localRandom: ByteArray)
 
@@ -53,6 +56,12 @@ object TelinkProtocol {
     const val PAIR_RESPONSE_OPCODE = 0x0D
     const val COMMAND_ON_OFF = 0xF0
     const val COMMAND_RGB = 0xF1
+    /** White light uses the same light-attribute opcode as RGB; only the payload differs. */
+    const val COMMAND_WHITE = COMMAND_RGB
+
+    const val WHITE_WARMEST_KELVIN = 2700
+    const val WHITE_NEUTRAL_KELVIN = 4600
+    const val WHITE_COOLEST_KELVIN = 6500
 
     const val SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0d1910"
     const val PAIR_UUID = "00010203-0405-0607-0809-0a0b0c0d1914"
@@ -295,6 +304,40 @@ object TelinkProtocol {
             }
         }
         return byteArrayOf(brightness.toByte(), red.toByte(), green.toByte(), blue.toByte(), 0, 0, 0, 0)
+    }
+
+    /**
+     * Return the warm and cold white LED levels for a temperature in kelvin.
+     *
+     * Both channels are at full at 4600 K. Warmer temperatures dim the cold channel and cooler
+     * ones dim the warm channel, each reaching zero at 2700 K or 6500 K.
+     */
+    fun whiteChannels(temperature: Int): WhiteChannels {
+        if (temperature !in WHITE_WARMEST_KELVIN..WHITE_COOLEST_KELVIN) {
+            throw TelinkProtocolException(
+                "colour temperature must be from $WHITE_WARMEST_KELVIN K through $WHITE_COOLEST_KELVIN K",
+            )
+        }
+        if (temperature > WHITE_NEUTRAL_KELVIN) {
+            val span = WHITE_COOLEST_KELVIN - WHITE_NEUTRAL_KELVIN
+            return WhiteChannels((WHITE_COOLEST_KELVIN - temperature) * 255 / span, 255)
+        }
+        val span = WHITE_NEUTRAL_KELVIN - WHITE_WARMEST_KELVIN
+        return WhiteChannels(255, (temperature - WHITE_WARMEST_KELVIN) * 255 / span)
+    }
+
+    /**
+     * Build the white-LED parameter payload used by opcode `0xF1`.
+     *
+     * The RGB channels are zero, and bytes 4 and 5 drive the warm and cold white LEDs. This is
+     * the layout telinkpp documents for Briloner Control lights.
+     */
+    fun whiteParameters(temperature: Int, brightness: Int): ByteArray {
+        if (brightness !in 1..100) {
+            throw TelinkProtocolException("brightness must be from 1 through 100")
+        }
+        val channels = whiteChannels(temperature)
+        return byteArrayOf(brightness.toByte(), 0, 0, 0, channels.warm.toByte(), channels.cold.toByte(), 0, 0)
     }
 
     /** Return a random non-zero 24-bit command sequence number. */

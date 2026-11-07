@@ -12,13 +12,18 @@ from .daemon import DaemonError, request_daemon, socket_path_for_address
 from .protocol import (
     COMMAND_ON_OFF,
     COMMAND_RGB,
+    COMMAND_WHITE,
     DEFAULT_MESH_NAME,
     DEFAULT_PASSWORD,
+    WHITE_COOLEST_KELVIN,
+    WHITE_NEUTRAL_KELVIN,
+    WHITE_WARMEST_KELVIN,
     TelinkProtocolError,
     off_parameters,
     on_parameters,
     parse_rgb,
     rgb_parameters,
+    white_parameters,
 )
 from .script import Delay, LightCommand, ScriptError, ScriptStep, execute_script, load_script
 
@@ -67,6 +72,19 @@ def build_parser() -> argparse.ArgumentParser:
     color.add_argument("rgb", help="six hexadecimal digits, for example 00ff00")
     color.add_argument("--brightness", type=int, default=100, help="brightness from 1 through 100")
     _add_connection_options(color)
+
+    white = subcommands.add_parser("white", help="switch to the white LEDs instead of an RGB colour")
+    white.add_argument(
+        "--temperature",
+        type=int,
+        default=WHITE_NEUTRAL_KELVIN,
+        help=(
+            f"colour temperature in kelvin from {WHITE_WARMEST_KELVIN} (warm) through "
+            f"{WHITE_COOLEST_KELVIN} (cool); the default {WHITE_NEUTRAL_KELVIN} sets both white channels to full"
+        ),
+    )
+    white.add_argument("--brightness", type=int, default=100, help="brightness from 1 through 100")
+    _add_connection_options(white)
 
     script = subcommands.add_parser("script", help="run a light-control script file")
     script.add_argument("script", type=Path, help="path to a script file")
@@ -205,11 +223,17 @@ async def run(arguments: argparse.Namespace) -> int:
         opcode, parameters, description = COMMAND_ON_OFF, on_parameters(), "on"
     elif arguments.command == "off":
         opcode, parameters, description = COMMAND_ON_OFF, off_parameters(), "off"
-    else:
+    elif arguments.command == "white":
+        opcode = COMMAND_WHITE
+        parameters = white_parameters(arguments.temperature, arguments.brightness)
+        description = f"white {arguments.temperature} K, brightness {arguments.brightness}"
+    elif arguments.command == "color":
         red, green, blue = parse_rgb(arguments.rgb)
         opcode = COMMAND_RGB
         parameters = rgb_parameters(red, green, blue, arguments.brightness)
         description = f"colour rgb #{red:02x}{green:02x}{blue:02x}, brightness {arguments.brightness}"
+    else:
+        raise AssertionError(f"unhandled command {arguments.command!r}")
 
     await _send_command(arguments, socket_path, opcode, parameters, description)
     return 0

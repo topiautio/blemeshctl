@@ -1,6 +1,6 @@
 """Parser and executor for small declarative light-control scripts.
 
-The format intentionally exposes only ordinary on, off, and RGB controls.  It
+The format intentionally exposes only ordinary on, off, RGB, and white controls.  It
 never evaluates Python, shell commands, raw Telink packets, or other arbitrary
 input from a script file.
 """
@@ -15,11 +15,14 @@ from pathlib import Path
 from .protocol import (
     COMMAND_ON_OFF,
     COMMAND_RGB,
+    COMMAND_WHITE,
+    WHITE_NEUTRAL_KELVIN,
     TelinkProtocolError,
     off_parameters,
     on_parameters,
     parse_rgb,
     rgb_parameters,
+    white_parameters,
 )
 
 
@@ -128,6 +131,32 @@ def _parse_duration(value: str, source: str, line: _SourceLine) -> float:
     return seconds
 
 
+def _parse_white(words: Sequence[str], source: str, line: _SourceLine) -> LightCommand:
+    arguments = list(words[1:])
+    usage = "white takes an optional temperature such as 2700K, then an optional brightness from 1 through 100"
+    if len(arguments) > 2:
+        raise _error(source, line, usage)
+    temperature = WHITE_NEUTRAL_KELVIN
+    if arguments and arguments[0][-1:] in ("K", "k"):
+        kelvin = arguments.pop(0)[:-1]
+        if not kelvin.isascii() or not kelvin.isdigit():
+            raise _error(source, line, "white temperature must be whole kelvin such as 2700K")
+        temperature = int(kelvin)
+    brightness = 100
+    if arguments:
+        try:
+            brightness = int(arguments.pop(0))
+        except ValueError as exc:
+            raise _error(source, line, "brightness must be an integer from 1 through 100") from exc
+    if arguments:
+        raise _error(source, line, usage)
+    try:
+        parameters = white_parameters(temperature, brightness)
+    except TelinkProtocolError as exc:
+        raise _error(source, line, str(exc)) from exc
+    return LightCommand(line.number, f"white {temperature} K, brightness {brightness}", COMMAND_WHITE, parameters)
+
+
 def _parse_instruction(line: _SourceLine, source: str) -> LightCommand | Delay | Rainbow:
     words = line.text.split()
     instruction = words[0]
@@ -162,6 +191,8 @@ def _parse_instruction(line: _SourceLine, source: str) -> LightCommand | Delay |
             COMMAND_RGB,
             parameters,
         )
+    if instruction == "white":
+        return _parse_white(words, source, line)
     if instruction == "wait":
         if len(words) != 2:
             raise _error(source, line, "wait requires one positive duration")

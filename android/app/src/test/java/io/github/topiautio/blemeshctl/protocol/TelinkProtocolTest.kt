@@ -159,6 +159,30 @@ class CommandTests {
     }
 
     @Test
+    fun whiteChannelsFollowColourTemperature() {
+        val vectors = mapOf(
+            2700 to WhiteChannels(255, 0),
+            3000 to WhiteChannels(255, 40),
+            4600 to WhiteChannels(255, 255),
+            4601 to WhiteChannels(254, 255),
+            5000 to WhiteChannels(201, 255),
+            6500 to WhiteChannels(0, 255),
+        )
+        for ((temperature, channels) in vectors) {
+            assertEquals("$temperature K", channels, TelinkProtocol.whiteChannels(temperature))
+        }
+    }
+
+    @Test
+    fun whiteParametersDriveOnlyTheWhiteChannels() {
+        assertEquals("64000000ffff0000", TelinkProtocol.whiteParameters(4600, 100).toHex())
+        assertEquals("3c000000ff000000", TelinkProtocol.whiteParameters(2700, 60).toHex())
+        for ((temperature, brightness) in listOf(2699 to 100, 6501 to 100, 4600 to 0, 4600 to 101)) {
+            assertThrows(TelinkProtocolException::class.java) { TelinkProtocol.whiteParameters(temperature, brightness) }
+        }
+    }
+
+    @Test
     fun parsesConventionalRgb() {
         assertEquals(Rgb(0, 255, 0), TelinkProtocol.parseRgb("#00ff00"))
         assertEquals(Rgb(0x12, 0x34, 0x56), TelinkProtocol.parseRgb("123456"))

@@ -164,6 +164,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/set_colour"/>
+        <Button
+            android:id="@+id/whiteButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/set_white"/>
         <TextView
             android:textStyle="bold"
             android:textColor="@color/text_primary"

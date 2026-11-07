@@ -84,6 +84,7 @@ class MainActivity : Activity() {
     private lateinit var brightnessText: TextView
     private lateinit var brightnessSeekBar: SeekBar
     private lateinit var colorButton: Button
+    private lateinit var whiteButton: Button
     private lateinit var scriptEditor: EditText
     private lateinit var loadCycleButton: Button
     private lateinit var loadRainbowButton: Button
@@ -144,6 +145,7 @@ class MainActivity : Activity() {
         brightnessText = findViewById(R.id.brightnessText)
         brightnessSeekBar = findViewById(R.id.brightnessSeekBar)
         colorButton = findViewById(R.id.colorButton)
+        whiteButton = findViewById(R.id.whiteButton)
         scriptEditor = findViewById(R.id.scriptEditor)
         loadCycleButton = findViewById(R.id.loadCycleButton)
         loadRainbowButton = findViewById(R.id.loadRainbowButton)
@@ -208,6 +210,7 @@ class MainActivity : Activity() {
             runNormalCommand(TelinkProtocol.COMMAND_ON_OFF, TelinkProtocol.offParameters(), "pois")
         }
         colorButton.setOnClickListener { runColorCommand() }
+        whiteButton.setOnClickListener { runWhiteCommand() }
         disconnectButton.setOnClickListener { disconnect() }
         loadCycleButton.setOnClickListener { loadAsset("rgb-cycle.blemesh") }
         loadRainbowButton.setOnClickListener { loadAsset("rainbow.blemesh") }
@@ -275,6 +278,17 @@ class MainActivity : Activity() {
             TelinkProtocol.COMMAND_RGB,
             TelinkProtocol.rgbParameters(rgb.red, rgb.green, rgb.blue, brightness),
             "väri #${hex(rgb.red)}${hex(rgb.green)}${hex(rgb.blue)}, kirkkaus $brightness %",
+        )
+    }
+
+    /** Switch to the light's own white LEDs at the selected brightness, with both channels at full. */
+    private fun runWhiteCommand() {
+        val brightness = brightnessSeekBar.progress + 1
+        val temperature = TelinkProtocol.WHITE_NEUTRAL_KELVIN
+        runNormalCommand(
+            TelinkProtocol.COMMAND_WHITE,
+            TelinkProtocol.whiteParameters(temperature, brightness),
+            "valkoinen $temperature K, kirkkaus $brightness %",
         )
     }
 
@@ -538,6 +552,7 @@ class MainActivity : Activity() {
         colorWheel.isEnabled = enabled
         brightnessSeekBar.isEnabled = enabled
         colorButton.isEnabled = enabled
+        whiteButton.isEnabled = enabled
         scriptEditor.isEnabled = enabled
         loadCycleButton.isEnabled = enabled
         loadRainbowButton.isEnabled = enabled
@@ -558,6 +573,7 @@ class MainActivity : Activity() {
         offButton.isEnabled = enabled
         disconnectButton.isEnabled = enabled
         colorButton.isEnabled = enabled
+        whiteButton.isEnabled = enabled
         runScriptButton.isEnabled = enabled
     }
 

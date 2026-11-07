@@ -145,7 +145,7 @@ jobs:
             --notes-file - \
             --repo "$GITHUB_REPOSITORY" <<'NOTES'
           Android app for controlling legacy Telink BleMesh lights directly over Bluetooth LE.
-          It sends only normal on, off, and RGB commands, and runs `.blemesh` scripts while the app is open.
+          It sends only normal on, off, colour, and white-light commands, and runs `.blemesh` scripts while the app is open.
 
           Install by opening the APK on the phone and allowing installs from that source.
           If a build signed with a different key is already installed, uninstall it first;

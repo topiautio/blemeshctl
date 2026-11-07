@@ -4,10 +4,10 @@
 It was built and verified against a Briloner Control-compatible light that
 advertises as `BleMesh`.
 
-It supports discovery, on, off, solid RGB colour, and simple animation
-scripts. It intentionally does not support provisioning, factory reset, or OTA
-firmware updates. An [Android app](#android-app) with the same controls and
-script language lives in `android/`.
+It supports discovery, on, off, solid RGB colour, white light, and simple
+animation scripts. It intentionally does not support provisioning, factory
+reset, or OTA firmware updates. An [Android app](#android-app) with the same
+controls and script language lives in `android/`.
 
 ## Install
 
@@ -87,6 +87,7 @@ Control a light by its MAC address:
 blemeshctl on --address A4:C1:38:93:1B:72
 blemeshctl color 00ff00 --address A4:C1:38:93:1B:72
 blemeshctl color '#00ff00' --brightness 65 --address A4:C1:38:93:1B:72
+blemeshctl white --address A4:C1:38:93:1B:72
 blemeshctl off --address A4:C1:38:93:1B:72
 ```
 
@@ -104,13 +105,32 @@ blemeshctl on \
   --password MyPassword
 ```
 
+### White light
+
+`white` sends the white-LED command that
+[telinkpp](https://github.com/vpaeder/telinkpp) documents from its analysis of
+the Briloner Control app. It sets the red, green, and blue channels to zero and
+drives the warm and cold white channels instead, so it is a different command
+from `color ffffff`, which mixes white from the RGB LEDs:
+
+```bash
+blemeshctl white --address A4:C1:38:93:1B:72
+blemeshctl white --temperature 2700 --brightness 60 --address A4:C1:38:93:1B:72
+```
+
+`--temperature` takes a value from 2700 K (warm) through 6500 K (cool). The
+default, 4600 K, sets both white channels to full. Away from 4600 K, one
+channel dims linearly to zero at its end of the range. The default `white`
+turned the tested light bright white. Other temperatures have not been checked
+on a physical light yet.
+
 ### Retained connections
 
 The first command has to wait for the light to advertise, connect, and
 authenticate. After that, `blemeshctl` keeps the authenticated connection open
-for 60 seconds after the last command. Another `on`, `off`, or `color` command
-for the same address reuses it and resets the timer, so repeated commands are
-fast:
+for 60 seconds after the last command. Another `on`, `off`, `color`, or `white`
+command for the same address reuses it and resets the timer, so repeated
+commands are fast:
 
 ```bash
 blemeshctl color ff0000 --address A4:C1:38:93:1B:72
@@ -176,6 +196,7 @@ loop:
 | --- | --- |
 | `on`, `off` | Turn the light on or off |
 | `color RRGGBB [brightness]` | Set a solid colour, optionally with brightness 1–100 |
+| `white [temperatureK] [brightness]` | Switch to the white LEDs, for example `white`, `white 60`, or `white 2700K 60` |
 | `wait duration` | Pause |
 | `rainbow duration` | Sweep through the saturated colour wheel, holding each step for `duration` |
 | `repeat N:` | Run the indented block `N` times |
@@ -183,6 +204,10 @@ loop:
 
 A duration is a positive number of seconds, optionally ending in `ms`, `s`, or
 `m`; for example `0.5`, `250ms`, `1s`, or `2m`.
+
+A `white` temperature is whole kelvin ending in `K`, from `2700K` through
+`6500K`. Without one, `white` uses `4600K`, which sets both white channels to
+full.
 
 `rainbow` steps through all 1,530 distinct fully saturated 8-bit RGB hues, from
 red around the colour wheel and back to red, without white or pastels. One
@@ -199,11 +224,12 @@ longer pauses.
 The `android/` directory holds a native Android app that uses the same Telink
 protocol, `.blemesh` script language, and safety limits as the CLI. It scans
 for compatible lights, remembers the last one used and connects to it ahead of
-time, and offers on, off, a colour wheel with brightness, and a script editor
-with the two bundled examples. Scripts run only while the app is in the
-foreground. The interface is in Finnish and follows the system dark theme on
-Android 10 and newer; the Appearance (Ulkoasu) option switches the dark theme
-to pure black for AMOLED screens.
+time, and offers on, off, a colour wheel with brightness, a white-light button
+that sends the same white-LED command as `white`, and a script editor with the
+two bundled examples. Scripts run only while the app is in the foreground. The
+interface is in Finnish and follows the system dark theme on Android 10 and
+newer; the Appearance (Ulkoasu) option switches the dark theme to pure black
+for AMOLED screens.
 
 The app needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask
 for the Nearby devices permission; older versions ask for location instead,

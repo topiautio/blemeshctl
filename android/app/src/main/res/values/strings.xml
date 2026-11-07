@@ -25,7 +25,7 @@
     <string name="rainbow_example">Sateenkaari</string>
     <string name="rgb_example">RGB-malli</string>
     <string name="run_script">Aja skripti</string>
-    <string name="safety_note">Sovellus lähettää vain normaalit on/off/RGB-komennot. Se ei tee paritusta, resetointia, provisiointia eikä OTA-päivityksiä.</string>
+    <string name="safety_note">Sovellus lähettää vain normaalit on/off-, väri- ja valkoisen valon komennot. Se ei tee paritusta, resetointia, provisiointia eikä OTA-päivityksiä.</string>
     <string name="scan_eight_seconds">Skannaa 8 s</string>
     <string name="script_heading">.blemesh-skripti</string>
     <string name="script_help">Skripti validoidaan kokonaan ennen ensimmäistä komentoa. Se pyörii vain sovelluksen ollessa etualalla.</string>
@@ -33,6 +33,7 @@
     <string name="selected_colour_preview">Valitun värin esikatselu</string>
     <string name="selected_light_description">Löydetty BleMesh-valo</string>
     <string name="set_colour">Lähetä valittu väri</string>
+    <string name="set_white">Valkoinen valo</string>
     <string name="stop_script">Pysäytä</string>
     <string name="subtitle">Legacy Telink -valon suora BLE-ohjaus</string>
     <string name="turn_off">Pois</string>

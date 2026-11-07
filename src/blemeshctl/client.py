@@ -11,6 +11,7 @@ from bleak import BleakClient, BleakScanner
 from .protocol import (
     COMMAND_ON_OFF,
     COMMAND_RGB,
+    COMMAND_WHITE,
     DEFAULT_MESH_NAME,
     DEFAULT_PASSWORD,
     TELINK_COMPANY_ID,
@@ -24,6 +25,7 @@ from .protocol import (
     on_parameters,
     parse_advertisement,
     rgb_parameters,
+    white_parameters,
 )
 
 SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0d1910"
@@ -154,6 +156,9 @@ class BleMeshController:
 
     async def set_rgb(self, red: int, green: int, blue: int, brightness: int) -> AdvertisementInfo:
         return await self.send(COMMAND_RGB, rgb_parameters(red, green, blue, brightness))
+
+    async def set_white(self, temperature: int, brightness: int) -> AdvertisementInfo:
+        return await self.send(COMMAND_WHITE, white_parameters(temperature, brightness))
 
 
 class BleMeshSession:
