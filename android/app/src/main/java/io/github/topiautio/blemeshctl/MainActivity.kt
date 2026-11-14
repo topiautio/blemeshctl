@@ -58,6 +58,22 @@ import io.github.topiautio.blemeshctl.script.BleMeshScript
 import io.github.topiautio.blemeshctl.script.LightCommand
 import io.github.topiautio.blemeshctl.script.ScriptException
 import io.github.topiautio.blemeshctl.script.ScriptStep
+import io.github.topiautio.blemeshctl.timer.FadeColour
+import io.github.topiautio.blemeshctl.timer.LightRef
+import io.github.topiautio.blemeshctl.timer.ResourceTextSource
+import io.github.topiautio.blemeshctl.timer.ScheduleField
+import io.github.topiautio.blemeshctl.timer.ScheduleBuilder
+import io.github.topiautio.blemeshctl.timer.ScheduleInput
+import io.github.topiautio.blemeshctl.timer.ScheduleResult
+import io.github.topiautio.blemeshctl.timer.TimerAction
+import io.github.topiautio.blemeshctl.timer.TimerHub
+import io.github.topiautio.blemeshctl.timer.TimerPlan
+import io.github.topiautio.blemeshctl.timer.TimerRecord
+import io.github.topiautio.blemeshctl.timer.TimerRequest
+import io.github.topiautio.blemeshctl.timer.TimerService
+import io.github.topiautio.blemeshctl.timer.TimerSpec
+import io.github.topiautio.blemeshctl.timer.TimerTarget
+import io.github.topiautio.blemeshctl.timer.TimerTexts
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -127,6 +143,23 @@ class MainActivity : Activity() {
     private lateinit var runScriptButton: Button
     private lateinit var stopScriptButton: Button
     private lateinit var pureBlackCheckBox: CheckBox
+    private lateinit var timerActionSpinner: Spinner
+    private lateinit var timerSceneSpinner: Spinner
+    private lateinit var timerDelayInput: EditText
+    private lateinit var timerFadeGroup: View
+    private lateinit var timerFadeWhiteRadio: RadioButton
+    private lateinit var timerFadeDurationInput: EditText
+    private lateinit var timerFadeFromInput: EditText
+    private lateinit var timerFadeToInput: EditText
+    private lateinit var timerScheduleButton: Button
+    private lateinit var timerNoteText: TextView
+    private lateinit var timerList: LinearLayout
+    private lateinit var noTimersText: TextView
+    private lateinit var timerClearButton: Button
+    private lateinit var timerTexts: TimerTexts
+    private var timerScenes: List<Scene> = emptyList()
+    private var renderedTimers: List<TimerRecord>? = null
+    private val timerListener: (List<TimerRecord>) -> Unit = { records -> runOnUiThread { renderTimers(records) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // The window background and system bar colours are read when the decor is
@@ -137,19 +170,29 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         bindViews()
+        timerTexts = TimerTexts(ResourceTextSource(this))
         library = LightLibrary(SharedPreferencesLibraryStorage(this))
         restoreInputs()
         refreshTargetSpinner(getSharedPreferences(PREFERENCES, MODE_PRIVATE).getString(PREF_TARGET_GROUP, null))
         configureBluetooth()
         // Scene buttons are enabled only when a Bluetooth client exists.
         refreshSceneList()
+        configureTimerSection()
         configureListeners()
         updatePermissionButton()
     }
 
     override fun onStart() {
         super.onStart()
+        TimerHub.coordinator.registry.addListener(timerListener)
+        renderTimers(TimerHub.coordinator.registry.list())
+        updateNotificationNote()
         startRememberedOrDiscover()
+    }
+
+    override fun onStop() {
+        TimerHub.coordinator.registry.removeListener(timerListener)
+        super.onStop()
     }
 
     override fun onPause() {
@@ -158,6 +201,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        TimerHub.coordinator.registry.removeListener(timerListener)
         operationJob?.cancel()
         scriptJob?.cancel()
         warmConnectJob?.cancel()
@@ -201,6 +245,19 @@ class MainActivity : Activity() {
         runScriptButton = findViewById(R.id.runScriptButton)
         stopScriptButton = findViewById(R.id.stopScriptButton)
         pureBlackCheckBox = findViewById(R.id.pureBlackCheckBox)
+        timerActionSpinner = findViewById(R.id.timerActionSpinner)
+        timerSceneSpinner = findViewById(R.id.timerSceneSpinner)
+        timerDelayInput = findViewById(R.id.timerDelayInput)
+        timerFadeGroup = findViewById(R.id.timerFadeGroup)
+        timerFadeWhiteRadio = findViewById(R.id.timerFadeWhiteRadio)
+        timerFadeDurationInput = findViewById(R.id.timerFadeDurationInput)
+        timerFadeFromInput = findViewById(R.id.timerFadeFromInput)
+        timerFadeToInput = findViewById(R.id.timerFadeToInput)
+        timerScheduleButton = findViewById(R.id.timerScheduleButton)
+        timerNoteText = findViewById(R.id.timerNoteText)
+        timerList = findViewById(R.id.timerList)
+        noTimersText = findViewById(R.id.noTimersText)
+        timerClearButton = findViewById(R.id.timerClearButton)
     }
 
     private fun configureBluetooth() {
@@ -720,6 +777,10 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_NOTIFICATIONS) {
+            updateNotificationNote()
+            return
+        }
         if (requestCode != REQUEST_BLUETOOTH_PERMISSIONS) return
         updatePermissionButton()
         if (hasBluetoothPermissions()) {
@@ -813,6 +874,7 @@ class MainActivity : Activity() {
         runScriptButton.isEnabled = enabled
         stopScriptButton.isEnabled = busy && scriptRunning
         pureBlackCheckBox.isEnabled = enabled
+        timerScheduleButton.isEnabled = enabled
     }
 
     private fun updateProgressVisibility() {
@@ -828,6 +890,7 @@ class MainActivity : Activity() {
         colorButton.isEnabled = enabled
         whiteButton.isEnabled = enabled
         runScriptButton.isEnabled = enabled
+        timerScheduleButton.isEnabled = enabled
         for (index in 0 until sceneList.childCount) sceneList.getChildAt(index).isEnabled = enabled
     }
 
@@ -948,6 +1011,8 @@ class MainActivity : Activity() {
             ?: return
         val currentClient = client ?: return
         if (warmConnectJob?.isActive == true || operationJob?.isActive == true || scriptJob?.isActive == true) return
+        // A timer owns the light's single connection until it finishes.
+        if (target.address.uppercase(Locale.ROOT) in TimerHub.coordinator.lockedAddresses()) return
         if (!hasBluetoothPermissions()) return
         val adapter = bluetoothAdapter ?: return
         if (!isAdapterEnabled(adapter)) return
@@ -1099,6 +1164,7 @@ class MainActivity : Activity() {
             )
         }
         noScenesText.visibility = if (scenes.isEmpty()) View.VISIBLE else View.GONE
+        refreshTimerScenes()
     }
 
     private fun showRenameLightDialog() {
@@ -1299,6 +1365,206 @@ class MainActivity : Activity() {
         setPadding(0, dp(4), 0, dp(4))
     }
 
+    // --- Timers -------------------------------------------------------------------------------
+
+    private val timerActions = listOf(TimerAction.ON, TimerAction.OFF, TimerAction.SCENE, TimerAction.FADE)
+
+    private fun configureTimerSection() {
+        val labels = listOf(
+            getString(R.string.turn_on),
+            getString(R.string.turn_off),
+            getString(R.string.timer_action_scene),
+            getString(R.string.timer_action_fade),
+        )
+        timerActionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        timerActionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val action = timerActions.getOrNull(position)
+                timerSceneSpinner.visibility = if (action == TimerAction.SCENE) View.VISIBLE else View.GONE
+                timerFadeGroup.visibility = if (action == TimerAction.FADE) View.VISIBLE else View.GONE
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        timerScheduleButton.setOnClickListener { scheduleTimer() }
+        timerClearButton.setOnClickListener { TimerHub.coordinator.registry.clear() }
+    }
+
+    private fun refreshTimerScenes() {
+        // Called while the layout is still being set up, before the timer section exists.
+        if (!::timerSceneSpinner.isInitialized) return
+        val previous = timerScenes.getOrNull(timerSceneSpinner.selectedItemPosition)?.name
+        timerScenes = library.scenes
+        val labels = if (timerScenes.isEmpty()) {
+            listOf(getString(R.string.timer_no_scene_choice))
+        } else {
+            timerScenes.map { it.name }
+        }
+        timerSceneSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        timerScenes.indexOfFirst { it.name == previous }.takeIf { it >= 0 }?.let { timerSceneSpinner.setSelection(it) }
+    }
+
+    private fun scheduleTimer() {
+        listOf(timerDelayInput, timerFadeDurationInput, timerFadeFromInput, timerFadeToInput).forEach { it.error = null }
+        val action = timerActions.getOrNull(timerActionSpinner.selectedItemPosition) ?: return
+        val scene = timerScenes.getOrNull(timerSceneSpinner.selectedItemPosition)
+        val rgb = colorWheel.selectedRgb
+        val input = ScheduleInput(
+            action = action,
+            delayText = timerDelayInput.text.toString(),
+            sceneName = scene?.name,
+            sceneScript = scene?.script,
+            fadeColour = if (timerFadeWhiteRadio.isChecked) FadeColour.WHITE else FadeColour.WHEEL,
+            wheelColour = hex(rgb.red) + hex(rgb.green) + hex(rgb.blue),
+            fadeDurationText = timerFadeDurationInput.text.toString(),
+            fromText = timerFadeFromInput.text.toString(),
+            toText = timerFadeToInput.text.toString(),
+        )
+        when (val result = ScheduleBuilder.build(input, System.currentTimeMillis())) {
+            is ScheduleResult.Invalid -> {
+                val message = timerTexts.problem(result.problem, result.detail)
+                val field = when (result.field) {
+                    ScheduleField.DELAY -> timerDelayInput
+                    ScheduleField.FADE_DURATION -> timerFadeDurationInput
+                    ScheduleField.FADE_FROM -> timerFadeFromInput
+                    ScheduleField.FADE_TO -> timerFadeToInput
+                    ScheduleField.SCENE, ScheduleField.FADE_COLOUR -> null
+                }
+                if (field != null) {
+                    field.error = message
+                    field.requestFocus()
+                } else {
+                    showStatus(message)
+                }
+            }
+            is ScheduleResult.Ready -> startTimer(result.plan)
+        }
+    }
+
+    private fun lightRef(address: String): LightRef = LightRef(address, lightName(address), infoFor(address))
+
+    /** Hand a validated timer to [TimerService], after this app has let go of the target's connections. */
+    private fun startTimer(plan: TimerPlan) {
+        if (operationJob?.isActive == true || scriptJob?.isActive == true) {
+            showStatus(getString(R.string.timer_busy))
+            return
+        }
+        val group = selectedGroup()
+        val target = if (group != null) {
+            TimerTarget(getString(R.string.timer_target_group, group.name), group.members.map(::lightRef), true)
+        } else {
+            val light = selectedLight() ?: return
+            TimerTarget(lightName(light.address), listOf(lightRef(light.address)), false)
+        }
+        if (!ensureBluetoothReady()) return
+
+        val request = TimerRequest(
+            description = timerTexts.describe(plan.summary),
+            target = target.label,
+            fireAtMillis = plan.fireAtMillis,
+            programText = plan.programText,
+        )
+        val spec = TimerSpec(request, target, currentCredentials())
+        cancelWarmConnection()
+        operationJob = uiScope.launch {
+            try {
+                setBusy(true)
+                // The light accepts one connection, so release ours before the service takes over.
+                val locked = target.addresses
+                val main = client
+                if (main != null && main.connectedAddress?.uppercase(Locale.ROOT)?.let { it in locked } == true) main.disconnect()
+                releaseGroupClients(keep = groupClients.keys.filter { it.uppercase(Locale.ROOT) !in locked }.toSet())
+                TimerHub.coordinator.enqueue(spec)
+                try {
+                    startForegroundService(TimerService.scheduleIntent(this@MainActivity))
+                    showStatus(
+                        getString(
+                            R.string.timer_scheduled_status,
+                            request.description,
+                            target.label,
+                            timerTexts.clock(plan.fireAtMillis),
+                        ),
+                    )
+                } catch (exception: Exception) {
+                    TimerHub.coordinator.discardPending()
+                    showStatus(getString(R.string.timer_start_failed, exception.message ?: exception.javaClass.simpleName))
+                }
+            } finally {
+                operationJob = null
+                setBusy(false)
+            }
+            ensureNotificationPermission()
+        }
+    }
+
+    /** Ask for notification permission once, on the first timer; the timer runs either way. */
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+            if (!preferences.getBoolean(PREF_ASKED_NOTIFICATIONS, false)) {
+                preferences.edit().putBoolean(PREF_ASKED_NOTIFICATIONS, true).apply()
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+                return
+            }
+        }
+        updateNotificationNote()
+    }
+
+    /** Show the note about hidden notifications once permission was asked for and not granted. */
+    private fun updateNotificationNote() {
+        val denied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).getBoolean(PREF_ASKED_NOTIFICATIONS, false)
+        timerNoteText.visibility = if (denied) View.VISIBLE else View.GONE
+    }
+
+    private fun renderTimers(records: List<TimerRecord>) {
+        if (records == renderedTimers) return
+        renderedTimers = records
+        timerList.removeAllViews()
+        records.forEach { timerList.addView(timerRow(it)) }
+        noTimersText.visibility = if (records.isEmpty()) View.VISIBLE else View.GONE
+        timerClearButton.isEnabled = records.any { !it.state.isActive }
+    }
+
+    private fun timerRow(record: TimerRecord): View {
+        val row = timerTexts.row(record)
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        column.addView(
+            TextView(this).apply {
+                text = row.title
+                setTextColor(getColor(R.color.text_primary))
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            },
+        )
+        column.addView(timerLine(row.meta))
+        row.detail?.let { column.addView(timerLine(it)) }
+        if (record.state.isActive) {
+            column.addView(
+                Button(this).apply {
+                    setText(R.string.cancel)
+                    setOnClickListener { TimerHub.coordinator.registry.cancel(record.id) }
+                },
+            )
+        }
+        return column
+    }
+
+    private fun timerLine(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(getColor(R.color.text_secondary))
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun isNightMode(): Boolean =
@@ -1329,5 +1595,7 @@ class MainActivity : Activity() {
         const val REQUEST_BLUETOOTH_PERMISSIONS = 100
         const val REQUEST_ENABLE_BLUETOOTH = 101
         const val REQUEST_OPEN_SCRIPT = 102
+        const val REQUEST_NOTIFICATIONS = 103
+        const val PREF_ASKED_NOTIFICATIONS = "asked_notifications"
     }
 }
