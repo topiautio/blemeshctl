@@ -3,6 +3,7 @@ package io.github.topiautio.blemeshctl
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Intent
@@ -12,6 +13,8 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.text.InputFilter
+import android.text.InputType
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -20,7 +23,11 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
@@ -33,10 +40,22 @@ import io.github.topiautio.blemeshctl.ble.InitialConnectionException
 import io.github.topiautio.blemeshctl.ble.MeshCredentials
 import io.github.topiautio.blemeshctl.color.ColorWheelView
 import io.github.topiautio.blemeshctl.color.WheelRgb
+import io.github.topiautio.blemeshctl.group.FailureKind
+import io.github.topiautio.blemeshctl.group.GroupRunner
+import io.github.topiautio.blemeshctl.group.MemberResult
+import io.github.topiautio.blemeshctl.library.LibraryException
+import io.github.topiautio.blemeshctl.library.LightGroup
+import io.github.topiautio.blemeshctl.library.LightLibrary
+import io.github.topiautio.blemeshctl.library.LightNames
+import io.github.topiautio.blemeshctl.library.Scene
+import io.github.topiautio.blemeshctl.library.SceneControls
+import io.github.topiautio.blemeshctl.library.SceneText
+import io.github.topiautio.blemeshctl.library.SharedPreferencesLibraryStorage
 import io.github.topiautio.blemeshctl.protocol.AdvertisementInfo
 import io.github.topiautio.blemeshctl.protocol.TelinkProtocol
 import io.github.topiautio.blemeshctl.protocol.TelinkProtocolException
 import io.github.topiautio.blemeshctl.script.BleMeshScript
+import io.github.topiautio.blemeshctl.script.LightCommand
 import io.github.topiautio.blemeshctl.script.ScriptException
 import io.github.topiautio.blemeshctl.script.ScriptStep
 import java.util.Locale
@@ -66,6 +85,14 @@ class MainActivity : Activity() {
     private var lightChoices: List<LightChoice> = emptyList()
     private var preferredAddress: String? = null
     private var ignoreSelectionCallback = false
+    private lateinit var library: LightLibrary
+    /** Groups in [targetSpinner] after its first "selected light" entry. */
+    private var targetGroups: List<LightGroup> = emptyList()
+    private var ignoreTargetCallback = false
+    /** One client per group member, so a group keeps one GATT connection per light. */
+    private val groupClients = LinkedHashMap<String, BleMeshClient>()
+    /** Advertisement details seen this session, so group members can connect without a scan. */
+    private val lightInfo = HashMap<String, AdvertisementInfo>()
 
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
@@ -73,6 +100,14 @@ class MainActivity : Activity() {
     private lateinit var scanButton: Button
     private lateinit var deviceSpinner: Spinner
     private lateinit var deviceDetailsText: TextView
+    private lateinit var renameLightButton: Button
+    private lateinit var targetSpinner: Spinner
+    private lateinit var newGroupButton: Button
+    private lateinit var editGroupButton: Button
+    private lateinit var deleteGroupButton: Button
+    private lateinit var sceneList: LinearLayout
+    private lateinit var noScenesText: TextView
+    private lateinit var saveSceneButton: Button
     private lateinit var meshNameInput: EditText
     private lateinit var passwordInput: EditText
     private lateinit var onButton: Button
@@ -102,8 +137,12 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         bindViews()
+        library = LightLibrary(SharedPreferencesLibraryStorage(this))
         restoreInputs()
+        refreshTargetSpinner(getSharedPreferences(PREFERENCES, MODE_PRIVATE).getString(PREF_TARGET_GROUP, null))
         configureBluetooth()
+        // Scene buttons are enabled only when a Bluetooth client exists.
+        refreshSceneList()
         configureListeners()
         updatePermissionButton()
     }
@@ -124,6 +163,7 @@ class MainActivity : Activity() {
         warmConnectJob?.cancel()
         uiScope.cancel()
         client?.shutdown()
+        releaseGroupClients()
         super.onDestroy()
     }
 
@@ -134,6 +174,14 @@ class MainActivity : Activity() {
         scanButton = findViewById(R.id.scanButton)
         deviceSpinner = findViewById(R.id.deviceSpinner)
         deviceDetailsText = findViewById(R.id.deviceDetailsText)
+        renameLightButton = findViewById(R.id.renameLightButton)
+        targetSpinner = findViewById(R.id.targetSpinner)
+        newGroupButton = findViewById(R.id.newGroupButton)
+        editGroupButton = findViewById(R.id.editGroupButton)
+        deleteGroupButton = findViewById(R.id.deleteGroupButton)
+        sceneList = findViewById(R.id.sceneList)
+        noScenesText = findViewById(R.id.noScenesText)
+        saveSceneButton = findViewById(R.id.saveSceneButton)
         meshNameInput = findViewById(R.id.meshNameInput)
         passwordInput = findViewById(R.id.passwordInput)
         onButton = findViewById(R.id.onButton)
@@ -193,6 +241,24 @@ class MainActivity : Activity() {
                 deviceDetailsText.text = getString(R.string.no_selected_device)
             }
         }
+        targetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                updateGroupButtons()
+                if (ignoreTargetCallback) return
+                if (selectedGroup() == null) {
+                    // Back to one light: its connection must not compete with group connections.
+                    releaseGroupClients()
+                    startWarmConnection()
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        renameLightButton.setOnClickListener { showRenameLightDialog() }
+        newGroupButton.setOnClickListener { showGroupDialog(null) }
+        editGroupButton.setOnClickListener { selectedGroup()?.let { showGroupDialog(it) } }
+        deleteGroupButton.setOnClickListener { selectedGroup()?.let { confirmDeleteGroup(it) } }
+        saveSceneButton.setOnClickListener { showSaveSceneDialog() }
         brightnessSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
                 brightnessText.text = getString(R.string.brightness, progress + 1)
@@ -293,6 +359,11 @@ class MainActivity : Activity() {
     }
 
     private fun runNormalCommand(opcode: Int, parameters: ByteArray, description: String) {
+        val group = selectedGroup()
+        if (group != null) {
+            runGroupProgram(listOf(LightCommand(1, description, opcode, parameters)), "Komento '$description'", group)
+            return
+        }
         val target = selectedLight() ?: return
         val currentClient = client ?: return
         if (!ensureBluetoothReady()) return
@@ -300,6 +371,7 @@ class MainActivity : Activity() {
 
         val credentials = currentCredentials()
         cancelWarmConnection()
+        releaseGroupClients()
         operationJob = uiScope.launch {
             try {
                 setBusy(true)
@@ -330,6 +402,7 @@ class MainActivity : Activity() {
             try {
                 setBusy(true)
                 currentClient.disconnect()
+                releaseGroupClients()
                 showStatus("BLE-yhteys katkaistiin. Valon tilaa ei muutettu.")
             } finally {
                 operationJob = null
@@ -347,6 +420,37 @@ class MainActivity : Activity() {
             showError(exception)
             return
         }
+        val group = selectedGroup()
+        if (group != null) {
+            runGroupProgram(program, "Skripti", group)
+        } else {
+            runSingleProgram(program, "Skripti käynnissä.", "Skripti valmistui.", "Skripti pysäytettiin")
+        }
+    }
+
+    /** Apply a stored scene to the selected light or group, validating it again first. */
+    private fun applyScene(scene: Scene) {
+        val program = try {
+            library.program(scene)
+        } catch (exception: IllegalArgumentException) {
+            showError(exception)
+            return
+        }
+        val group = selectedGroup()
+        if (group != null) {
+            runGroupProgram(program, "Kohtaus '${scene.name}'", group)
+        } else {
+            runSingleProgram(
+                program,
+                "Kohtaus '${scene.name}' käynnissä.",
+                "Kohtauksen '${scene.name}' komennot kirjoitettiin. Fyysistä tilaa ei vahvistettu.",
+                "Kohtaus '${scene.name}' pysäytettiin",
+            )
+        }
+    }
+
+    /** Run a validated program on the selected light, waiting for it if it is not reachable yet. */
+    private fun runSingleProgram(program: List<ScriptStep>, started: String, finished: String, stopped: String) {
         val target = selectedLight() ?: return
         val currentClient = client ?: return
         if (!ensureBluetoothReady()) return
@@ -354,11 +458,12 @@ class MainActivity : Activity() {
 
         val credentials = currentCredentials()
         cancelWarmConnection()
+        releaseGroupClients()
         scriptJob = uiScope.launch {
             try {
                 setBusy(true, scriptRunning = true)
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                showStatus("Skripti käynnissä. Ensimmäinen yhteys avataan tarvittaessa…")
+                showStatus("$started Ensimmäinen yhteys avataan tarvittaessa…")
                 BleMeshScript.execute(
                     program,
                     sendCommand = { command ->
@@ -395,9 +500,9 @@ class MainActivity : Activity() {
                         delay(step.milliseconds)
                     },
                 )
-                showStatus("Skripti valmistui.")
+                showStatus(finished)
             } catch (exception: CancellationException) {
-                showStatus("Skripti pysäytettiin ja BLE-yhteys katkaistaan.")
+                showStatus("$stopped ja BLE-yhteys katkaistaan.")
             } catch (exception: Exception) {
                 showError(exception)
             } finally {
@@ -413,6 +518,148 @@ class MainActivity : Activity() {
         running.cancel(CancellationException("stopped by user"))
         uiScope.launch {
             runCatching { client?.disconnect() }
+            groupClients.values.toList().forEach { runCatching { it.disconnect() } }
+        }
+    }
+
+    /**
+     * Run [program] once for every light in [group], fanning out each command.
+     *
+     * Each command is written to every member that is still responding before
+     * the next command or wait. A member that fails is reported and skipped for
+     * the rest of the run; it is never retried, because an interrupted write has
+     * an unknown outcome. Members are written one after another in a step.
+     */
+    private fun runGroupProgram(program: List<ScriptStep>, title: String, group: LightGroup) {
+        val mainClient = client ?: return
+        val adapter = bluetoothAdapter ?: return
+        if (!ensureBluetoothReady()) return
+        if (operationJob?.isActive == true || scriptJob?.isActive == true) return
+
+        val credentials = currentCredentials()
+        cancelWarmConnection()
+        scriptJob = uiScope.launch {
+            try {
+                setBusy(true, scriptRunning = true)
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                // Each member gets its own client; the single-light connection would duplicate one.
+                mainClient.disconnect()
+                releaseGroupClients(keep = group.members.toSet())
+                locateGroupMembers(group)
+                val runner = GroupRunner(
+                    group.members,
+                    connect = { member ->
+                        val receipt = groupClient(member, adapter).connect(member, infoFor(member), credentials)
+                        lightInfo[member] = receipt.info
+                    },
+                    send = { member, command ->
+                        groupClient(member, adapter)
+                            .send(member, infoFor(member), credentials, command.opcode, command.parameters)
+                    },
+                )
+                var lastProgress = ""
+                val results = runner.run(
+                    program,
+                    wait = { step ->
+                        if (step.report) {
+                            showStatus("$lastProgress\nRivi ${step.line}: odotetaan ${step.milliseconds} ms…")
+                        }
+                        delay(step.milliseconds)
+                    },
+                    onConnecting = { member ->
+                        showStatus("$title ryhmälle '${group.name}': yhdistetään valoon ${lightName(member)}…")
+                    },
+                    onMemberFailed = { result -> showStatus("${lastProgress}\n${failureText(result)}".trim()) },
+                    onCommand = { command, snapshot ->
+                        if (command.report) {
+                            lastProgress = commandProgress(command, snapshot)
+                            showStatus(lastProgress)
+                        }
+                    },
+                )
+                showStatus(groupSummary(title, group, results))
+            } catch (exception: CancellationException) {
+                showStatus("$title pysäytettiin ja ryhmän BLE-yhteydet katkaistaan.")
+            } catch (exception: Exception) {
+                showError(exception)
+            } finally {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                scriptJob = null
+                setBusy(false)
+            }
+        }
+    }
+
+    /**
+     * Find several uncached members with one shared scan.
+     *
+     * Android silently stops scans started more than about five times in 30
+     * seconds, so many members must not each start their own.
+     */
+    private suspend fun locateGroupMembers(group: LightGroup) {
+        val missing = group.members.filter { infoFor(it) == null }
+        val currentScanner = scanner ?: return
+        if (missing.size <= MAX_INDIVIDUAL_MEMBER_SCANS) return
+        showStatus("Etsitään ryhmän '${group.name}' ${missing.size} valoa yhdellä 8 sekunnin skannauksella…")
+        try {
+            currentScanner.scan().forEach { lightInfo[it.info.address] = it.info }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            // Members still missing then scan for themselves while connecting.
+        }
+    }
+
+    private fun groupClient(address: String, adapter: BluetoothAdapter): BleMeshClient =
+        groupClients.getOrPut(address) { BleMeshClient(this, adapter) }
+
+    /** Close group connections, except those to [keep]. */
+    private fun releaseGroupClients(keep: Set<String> = emptySet()) {
+        val released = groupClients.keys.filter { it !in keep }
+        for (address in released) {
+            groupClients.remove(address)?.shutdown()
+        }
+    }
+
+    private fun infoFor(address: String): AdvertisementInfo? =
+        lightInfo[address] ?: lightChoices.firstOrNull { it.address == address }?.info
+
+    private fun lightName(address: String): String = library.displayName(address)
+
+    private fun commandProgress(command: LightCommand, snapshot: List<MemberResult>): String {
+        val written = snapshot.filter { !it.failed }
+        return "Rivi ${command.line}: ${command.description} kirjoitettiin ${written.size}/${snapshot.size} " +
+            "valolle (${written.joinToString { lightName(it.address) }.ifEmpty { "ei yhdellekään" }}). " +
+            "Fyysistä tilaa ei vahvistettu."
+    }
+
+    private fun failureText(result: MemberResult): String {
+        val name = lightName(result.address)
+        val where = result.failedLine?.let { "rivillä $it" } ?: "yhdistettäessä"
+        val reason = when (result.failure) {
+            FailureKind.UNREACHABLE -> "ei tavoitettu $where"
+            FailureKind.UNCERTAIN -> "lopputulos epävarma $where"
+            else -> "virhe $where"
+        }
+        val before = if (result.commandsWritten > 0) " (aiemmin kirjoitettu ${result.commandsWritten} komentoa)" else ""
+        val message = result.error?.message ?: result.error?.javaClass?.simpleName ?: ""
+        return "• $name: $reason$before: $message. Valolle ei lähetetä enempää komentoja."
+    }
+
+    private fun groupSummary(title: String, group: LightGroup, results: List<MemberResult>): String = buildString {
+        val written = results.filter { !it.failed && it.commandsWritten > 0 }
+        val failed = results.filter { it.failed }
+        append("$title ryhmälle '${group.name}' päättyi.")
+        if (written.isEmpty()) {
+            append("\nYksikään ryhmän valo ei kuitannut komentoja.")
+        } else {
+            append("\nKirjoitettu ${written.size}/${results.size} valolle: ")
+            append(written.joinToString { "${lightName(it.address)} (${it.commandsWritten} komentoa)" })
+            append(". Fyysistä tilaa ei vahvistettu.")
+        }
+        if (failed.isNotEmpty()) {
+            append("\nEpäonnistui:")
+            failed.forEach { append("\n").append(failureText(it)) }
         }
     }
 
@@ -544,6 +791,12 @@ class MainActivity : Activity() {
         permissionButton.isEnabled = enabled
         scanButton.isEnabled = enabled
         deviceSpinner.isEnabled = enabled
+        renameLightButton.isEnabled = enabled
+        targetSpinner.isEnabled = enabled
+        newGroupButton.isEnabled = enabled
+        updateGroupButtons()
+        for (index in 0 until sceneList.childCount) sceneList.getChildAt(index).isEnabled = enabled
+        saveSceneButton.isEnabled = enabled
         meshNameInput.isEnabled = enabled
         passwordInput.isEnabled = enabled
         onButton.isEnabled = enabled
@@ -575,6 +828,7 @@ class MainActivity : Activity() {
         colorButton.isEnabled = enabled
         whiteButton.isEnabled = enabled
         runScriptButton.isEnabled = enabled
+        for (index in 0 until sceneList.childCount) sceneList.getChildAt(index).isEnabled = enabled
     }
 
     private fun showStatus(message: String) {
@@ -586,6 +840,7 @@ class MainActivity : Activity() {
             is CommandOutcomeUnknownException -> "Komennon lopputulos jäi epävarmaksi"
             is TelinkProtocolException -> "Telink-protokollavirhe"
             is ScriptException -> "Skriptivirhe"
+            is LibraryException -> "Tallennus epäonnistui"
             is BleMeshException -> "Bluetooth-virhe"
             else -> "Virhe"
         }
@@ -593,6 +848,7 @@ class MainActivity : Activity() {
     }
 
     private fun installDiscoveredLights(found: List<DiscoveredLight>) {
+        found.forEach { lightInfo[it.info.address] = it.info }
         val discovered = found.map { LightChoice(it.info.address, it.info) }
         val preferred = preferredAddress
         // Keep a remembered light selectable even when it did not advertise this time.
@@ -627,7 +883,8 @@ class MainActivity : Activity() {
     }
 
     private fun label(choice: LightChoice): String {
-        val base = choice.info?.displayLabel() ?: "BleMesh  ${choice.address}"
+        val advertised = choice.info?.displayLabel() ?: "BleMesh  ${choice.address}"
+        val base = library.alias(choice.address)?.let { "$it · $advertised" } ?: advertised
         return if (choice.address == preferredAddress) "Viimeksi käytetty · $base" else base
     }
 
@@ -656,6 +913,7 @@ class MainActivity : Activity() {
 
     private fun updateConnectedLight(info: AdvertisementInfo) {
         preferredAddress = info.address
+        lightInfo[info.address] = info
         val choice = LightChoice(info.address, info)
         rememberLight(choice)
         val current = lightChoices.firstOrNull { it.address == info.address }
@@ -683,6 +941,8 @@ class MainActivity : Activity() {
 
     /** Connect to the selected light ahead of time so the first command is quick. */
     private fun startWarmConnection() {
+        // While a group is the target, its members have their own connections.
+        if (selectedGroup() != null) return
         val target = lightChoices.getOrNull(deviceSpinner.selectedItemPosition)
             ?: lightChoices.firstOrNull { it.address == preferredAddress }
             ?: return
@@ -787,8 +1047,259 @@ class MainActivity : Activity() {
             .putInt(PREF_BRIGHTNESS, brightnessSeekBar.progress + 1)
             .putString(PREF_ADDRESS, preferredAddress)
             .putString(PREF_SCRIPT, scriptEditor.text.toString().take(MAX_SCRIPT_CHARACTERS))
+            .putString(PREF_TARGET_GROUP, selectedGroup()?.name)
             .apply()
     }
+
+    /** The group chosen in [targetSpinner], or null when commands go to the selected light. */
+    private fun selectedGroup(): LightGroup? = targetGroups.getOrNull(targetSpinner.selectedItemPosition - 1)
+
+    private fun refreshTargetSpinner(selectName: String?) {
+        targetGroups = library.groups
+        val labels = listOf("Valittu valo") + targetGroups.map { "Ryhmä ${it.name} (${it.members.size} valoa)" }
+        val index = selectName
+            ?.let { name -> targetGroups.indexOfFirst { LightNames.sameName(it.name, name) } }
+            ?.takeIf { it >= 0 }
+            ?.plus(1)
+            ?: 0
+        // Programmatic selection must not look like the user picking a target.
+        ignoreTargetCallback = true
+        targetSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        targetSpinner.setSelection(index)
+        updateGroupButtons()
+        targetSpinner.post { ignoreTargetCallback = false }
+    }
+
+    private fun updateGroupButtons() {
+        val hasGroup = selectedGroup() != null
+        editGroupButton.isEnabled = !busy && hasGroup
+        deleteGroupButton.isEnabled = !busy && hasGroup
+    }
+
+    /** One button per scene: a tap applies it, a long press offers rename, editor, and delete. */
+    private fun refreshSceneList() {
+        sceneList.removeAllViews()
+        val scenes = library.scenes
+        for (scene in scenes) {
+            val button = Button(this).apply {
+                text = scene.name
+                isEnabled = !busy && client != null
+                contentDescription = "Käytä kohtausta ${scene.name} valitulle kohteelle"
+                setOnClickListener { applyScene(scene) }
+                setOnLongClickListener {
+                    showSceneActions(scene)
+                    true
+                }
+            }
+            sceneList.addView(
+                button,
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
+            )
+        }
+        noScenesText.visibility = if (scenes.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun showRenameLightDialog() {
+        val light = selectedLight() ?: return
+        val input = nameInput(R.string.light_name_hint, library.alias(light.address))
+        showForm("Nimeä valo ${light.address}", dialogContent(input, helpText(R.string.name_rule_help)), input) {
+            library.setAlias(light.address, input.text.toString())
+            refreshLightSpinner()
+            refreshTargetSpinner(selectedGroup()?.name)
+            library.alias(light.address)
+                ?.let { "Valo ${light.address} on nyt '$it'. Valolle ei lähetetty mitään." }
+                ?: "Valon ${light.address} nimi poistettiin. Valolle ei lähetetty mitään."
+        }
+    }
+
+    private fun showGroupDialog(existing: LightGroup?) {
+        // Lights the app knows about: named lights, group members, and lights seen this session.
+        val candidates = (library.knownAddresses + lightChoices.map { it.address } + lightInfo.keys)
+            .distinct()
+            .sortedWith(compareBy({ library.alias(it) == null }, { LightNames.key(lightName(it)) }))
+        if (candidates.isEmpty()) {
+            showStatus("Skannaa ensin valot, jotta ne voi lisätä ryhmään.")
+            return
+        }
+        val input = nameInput(R.string.group_name_hint, existing?.name)
+        val boxes = candidates.map { address ->
+            CheckBox(this).apply {
+                text = library.alias(address)?.let { "$it · $address" } ?: address
+                isChecked = existing?.members?.contains(address) == true
+                minHeight = dp(48)
+            }
+        }
+        val content = dialogContent(
+            input,
+            helpText(R.string.name_rule_help),
+            helpText(R.string.group_members),
+            *boxes.toTypedArray(),
+        )
+        val title = existing?.let { "Muokkaa ryhmää '${it.name}'" } ?: getString(R.string.new_group).trimEnd('…')
+        showForm(title, content, input) {
+            val members = candidates.filterIndexed { index, _ -> boxes[index].isChecked }
+            val group = library.saveGroup(
+                input.text.toString(),
+                members,
+                discoveredAddresses = candidates.toSet(),
+                replacing = existing?.name,
+            )
+            refreshTargetSpinner(group.name)
+            "Ryhmä '${group.name}' tallennettiin ja valittiin kohteeksi: ${group.members.joinToString { lightName(it) }}. " +
+                "Valoihin ei lähetetty mitään."
+        }
+    }
+
+    private fun confirmDeleteGroup(group: LightGroup) {
+        AlertDialog.Builder(this)
+            .setTitle("Poistetaanko ryhmä '${group.name}'?")
+            .setMessage("Valot ja niiden nimet säilyvät. Valoihin ei lähetetä mitään.")
+            .setPositiveButton(R.string.delete) { _, _ ->
+                try {
+                    library.deleteGroup(group.name)
+                } catch (exception: LibraryException) {
+                    showError(exception)
+                    return@setPositiveButton
+                }
+                releaseGroupClients()
+                refreshTargetSpinner(null)
+                showStatus("Ryhmä '${group.name}' poistettiin. Kohteena on nyt valittu valo.")
+                startWarmConnection()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun showSaveSceneDialog() {
+        val rgb = colorWheel.selectedRgb
+        val brightness = brightnessSeekBar.progress + 1
+        val white = TelinkProtocol.WHITE_NEUTRAL_KELVIN
+        val options: List<Pair<String, () -> String>> = listOf(
+            "Väri #${hex(rgb.red)}${hex(rgb.green)}${hex(rgb.blue)}, kirkkaus $brightness %" to {
+                SceneText.fromControls(SceneControls.Colour(rgb.red, rgb.green, rgb.blue, brightness))
+            },
+            "Valkoinen $white K, kirkkaus $brightness %" to {
+                SceneText.fromControls(SceneControls.White(white, brightness))
+            },
+            "Päälle" to { SceneText.fromControls(SceneControls.On) },
+            "Pois" to { SceneText.fromControls(SceneControls.Off) },
+            "Editorin skripti" to { scriptEditor.text.toString() },
+        )
+        val choices = RadioGroup(this)
+        val buttons = options.map { (label, _) ->
+            RadioButton(this).apply {
+                id = View.generateViewId()
+                text = label
+                minHeight = dp(48)
+            }.also { choices.addView(it) }
+        }
+        choices.check(buttons.first().id)
+        val input = nameInput(R.string.scene_name_hint, null)
+        showForm(getString(R.string.save_scene).trimEnd('…'), dialogContent(input, helpText(R.string.scene_from), choices), input) {
+            val selected = buttons.indexOfFirst { it.isChecked }.coerceAtLeast(0)
+            val scene = library.saveScene(input.text.toString(), options[selected].second())
+            refreshSceneList()
+            "Kohtaus '${scene.name}' tallennettiin. Sitä ei ole vielä ajettu."
+        }
+    }
+
+    private fun showSceneActions(scene: Scene) {
+        AlertDialog.Builder(this)
+            .setTitle("Kohtaus '${scene.name}'")
+            .setItems(arrayOf("Käytä", "Nimeä uudelleen…", "Avaa editoriin", "Poista…")) { _, which ->
+                when (which) {
+                    0 -> applyScene(scene)
+                    1 -> showRenameSceneDialog(scene)
+                    2 -> {
+                        scriptEditor.setText(scene.script)
+                        showStatus("Kohtaus '${scene.name}' avattiin editoriin. Sitä ei ole ajettu.")
+                    }
+                    else -> confirmDeleteScene(scene)
+                }
+            }
+            .show()
+    }
+
+    private fun showRenameSceneDialog(scene: Scene) {
+        val input = nameInput(R.string.scene_name_hint, scene.name)
+        showForm("Nimeä kohtaus '${scene.name}'", dialogContent(input), input) {
+            val renamed = library.renameScene(scene.name, input.text.toString())
+            refreshSceneList()
+            "Kohtaus '${scene.name}' on nyt '${renamed.name}'."
+        }
+    }
+
+    private fun confirmDeleteScene(scene: Scene) {
+        AlertDialog.Builder(this)
+            .setTitle("Poistetaanko kohtaus '${scene.name}'?")
+            .setMessage("Valoihin ei lähetetä mitään.")
+            .setPositiveButton(R.string.delete) { _, _ ->
+                try {
+                    library.deleteScene(scene.name)
+                    refreshSceneList()
+                    showStatus("Kohtaus '${scene.name}' poistettiin.")
+                } catch (exception: LibraryException) {
+                    showError(exception)
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Show a dialog that stays open until [save] succeeds.
+     *
+     * A validation error is shown on [input]; [save] returns the status message.
+     */
+    private fun showForm(title: String, content: View, input: EditText, save: () -> String) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(content)
+            .setPositiveButton(R.string.save, null)
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                try {
+                    val message = save()
+                    dialog.dismiss()
+                    showStatus(message)
+                } catch (exception: IllegalArgumentException) {
+                    input.error = exception.message ?: exception.javaClass.simpleName
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun dialogContent(vararg views: View): View {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        views.forEach { column.addView(it) }
+        return ScrollView(this).apply { addView(column) }
+    }
+
+    private fun nameInput(hint: Int, text: String?): EditText = EditText(this).apply {
+        setHint(hint)
+        setText(text.orEmpty())
+        isSingleLine = true
+        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        filters = arrayOf(InputFilter.LengthFilter(LightNames.MAX_NAME_LENGTH))
+        importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+    }
+
+    private fun helpText(text: Int): TextView = TextView(this).apply {
+        setText(text)
+        textSize = 13f
+        setTextColor(getColor(R.color.text_secondary))
+        setPadding(0, dp(4), 0, dp(4))
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun isNightMode(): Boolean =
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
@@ -797,6 +1308,8 @@ class MainActivity : Activity() {
 
     private companion object {
         const val MAX_SCRIPT_CHARACTERS = 262_144
+        /** Up to this many uncached group members may each scan for themselves. */
+        const val MAX_INDIVIDUAL_MEMBER_SCANS = 3
         const val DEFAULT_COLOR = "00ff00"
         const val PREFERENCES = "blemeshctl"
         const val PREF_ADDRESS = "address"
@@ -812,6 +1325,7 @@ class MainActivity : Activity() {
         const val PREF_PASSWORD = "password"
         const val PREF_PURE_BLACK = "pure_black"
         const val PREF_SCRIPT = "script"
+        const val PREF_TARGET_GROUP = "target_group"
         const val REQUEST_BLUETOOTH_PERMISSIONS = 100
         const val REQUEST_ENABLE_BLUETOOTH = 101
         const val REQUEST_OPEN_SCRIPT = 102
