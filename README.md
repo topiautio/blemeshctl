@@ -219,6 +219,73 @@ Every action reuses the retained connection. If a `wait` is at least as long
 as `--keepalive-seconds`, the next action reconnects; raise that option for
 longer pauses.
 
+## Light names and groups
+
+Give lights short names instead of repeating MAC addresses, and group them
+to control several lights at once:
+
+```bash
+blemeshctl alias add desk A4:C1:38:93:1B:72
+blemeshctl alias add shelf 00:11:22:33:44:55
+blemeshctl group add office desk shelf
+blemeshctl alias list
+blemeshctl group list
+
+blemeshctl on --light desk
+blemeshctl color ff8800 --brightness 40 --light office
+blemeshctl script examples/rgb-cycle.blemesh --light office
+```
+
+`--light` accepts an alias, a group, or a MAC address and replaces
+`--address`. You can't give both. Names use letters, digits, `_` and `-`.
+Group members are MAC addresses or aliases; groups can't contain other
+groups. Redefining an existing alias or group needs `--force`, and an alias
+can't be removed while a group uses it.
+
+Names are stored in `lights.json` under `$XDG_CONFIG_HOME/blemeshctl`
+(default `~/.config/blemeshctl`). The directory is private (mode 0700) and
+the file holds only names and MAC addresses. Mesh names and passwords stay
+command-line options.
+
+A group sends each command, or each script step, to every member before
+moving on, so the lights stay in step. Each member keeps its own retained
+connection, so `daemon status` and `daemon stop` take one member `--address`
+at a time. Unlike a single `--address`, a group doesn't wait for unavailable
+lights unless you pass `--wait-for-connection`. If you do, one unavailable
+member holds back every step.
+
+If a member fails, its error is printed and no further commands are sent to
+it, because the outcome of a failed write is unknown. The other members carry
+on. A "sent" line is printed only for lights that responded, and the command
+exits with status 1 if any member failed. A "sent" line means the command was
+delivered to the light's connection, not that the light was seen to change.
+
+## Scenes
+
+A scene is a named, saved script in the same `.blemesh` syntax:
+
+```bash
+blemeshctl scene save evening --color ff8800 --brightness 40
+blemeshctl scene save reading --white 2700 --brightness 60
+blemeshctl scene save night --off
+blemeshctl scene save party --from-file examples/rainbow.blemesh
+blemeshctl scene apply evening --light office
+blemeshctl scene list
+blemeshctl scene show evening
+blemeshctl scene delete night
+```
+
+`--on`, `--off`, `--color` and `--white` each save a one-line scene; use
+`--from-file PATH` (or `-` for standard input) for anything longer. The text
+is fully validated before it is saved. Saving over an existing scene needs
+`--force`. Scenes are stored as `scenes/NAME.blemesh` in the same
+configuration directory. `scene apply` runs a scene exactly like
+`blemeshctl script`, on one light or a group. A light's current state can't
+be read, so there is no way to save a scene from a light. A `color` or `white`
+scene does not add an `on`; whether those commands power on a light that is off
+has not been checked on a device, so add an `on` line with `--from-file` if
+you need it.
+
 ## Android app
 
 The `android/` directory holds a native Android app that uses the same Telink
@@ -230,6 +297,31 @@ two bundled examples. Scripts run only while the app is in the foreground. The
 interface is in Finnish and follows the system dark theme on Android 10 and
 newer; the Appearance (Ulkoasu) option switches the dark theme to pure black
 for AMOLED screens.
+
+Tap **Nimeä valo…** to give the selected light a name such as `Olohuone`; the
+picker then shows the name next to the address. Names start with a letter or
+digit and may contain A–Z, digits, spaces, `_` and `-` (up to 32 characters,
+case-insensitive). A light and a group cannot share a name.
+
+**Kohde** chooses where commands go: the selected light (the default) or a
+group. Create a group with **Uusi ryhmä…** and tick the lights you have scanned
+or named. With a group selected, the on/off, colour, white, script and scene
+controls run once for the whole group: each command is written to every member
+before the next command or wait, so members stay in step. A member that cannot
+be reached, or whose write is interrupted, is reported in the status area and
+receives no further commands; the others continue. "Written" means Android
+received a GATT acknowledgement, not that the light was seen to change.
+
+A scene is a named `.blemesh` script. **Tallenna kohtaus…** saves the current
+colour and brightness, neutral white and brightness, on, off, or the editor's
+script; the script is validated before it is saved. Tap a scene to apply it to
+the current target; long-press it to rename, delete, or open it in the editor.
+
+Names, groups and scenes are stored only in the app's private storage, are
+excluded from backups, and never contain the mesh name or password. All group
+members must use the app's mesh credentials, and Android supports only a
+limited number of simultaneous connections (typically about seven lights).
+The CLI and the app keep separate name and scene stores.
 
 The app needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask
 for the Nearby devices permission; older versions ask for location instead,
