@@ -20,6 +20,7 @@ from .client import (
     BleMeshError,
     BleMeshSession,
     InitialConnectionError,
+    validate_target_mesh_address,
 )
 from .protocol import TelinkProtocolError
 
@@ -230,6 +231,17 @@ def _config_from_request(request: dict[str, Any]) -> SessionConfig:
     return SessionConfig(address, mesh_name, password, scan_timeout, connect_timeout)
 
 
+def _target_from_request(request: dict[str, Any]) -> int | None:
+    """Return the optional relay destination; absent means the connected light."""
+
+    target = request.get("target_mesh_address")
+    try:
+        validate_target_mesh_address(target)
+    except TelinkProtocolError as exc:
+        raise DaemonError(str(exc)) from exc
+    return target
+
+
 def _idle_timeout_from_request(request: dict[str, Any]) -> float:
     try:
         timeout = float(request.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
@@ -274,6 +286,7 @@ class KeepaliveDaemon:
             raise DaemonError("command opcode must fit in one byte")
         if len(parameters) > 10:
             raise DaemonError("command parameters may be at most 10 bytes")
+        target = _target_from_request(request)
 
         self._active_requests += 1
         try:
@@ -293,7 +306,10 @@ class KeepaliveDaemon:
                         "run 'blemeshctl daemon stop' first"
                     )
                 reused = self._session.is_connected
-                info = await self._session.send(opcode, parameters)
+                if target is None:
+                    info = await self._session.send(opcode, parameters)
+                else:
+                    info = await self._session.send(opcode, parameters, mesh_address=target)
                 self.idle_timeout = idle_timeout
                 self._touch()
         except InitialConnectionError as exc:
@@ -305,9 +321,12 @@ class KeepaliveDaemon:
             raise DaemonError(str(exc)) from exc
         finally:
             self._active_requests -= 1
+        # "address" and "mesh_address" describe the connected light; the frame
+        # itself went to "target_mesh_address", which differs when relayed.
         return {
             "address": info.address,
             "mesh_address": info.mesh_address,
+            "target_mesh_address": info.mesh_address if target is None else target,
             "reused": reused,
             "idle_timeout": self.idle_timeout,
         }

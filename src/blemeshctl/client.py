@@ -32,6 +32,7 @@ SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0d1910"
 PAIR_UUID = "00010203-0405-0607-0809-0a0b0c0d1914"
 COMMAND_UUID = "00010203-0405-0607-0809-0a0b0c0d1912"
 DEFAULT_CONNECTION_SCAN_TIMEOUT = 20.0
+BROADCAST_MESH_ADDRESS = 0xFFFF
 
 
 class BleMeshError(RuntimeError):
@@ -44,6 +45,19 @@ class InitialConnectionError(BleMeshError):
 
 class LightUnavailableError(InitialConnectionError):
     """The explicitly selected light was not advertising a usable Telink payload."""
+
+
+def validate_target_mesh_address(mesh_address: int | None) -> None:
+    """Reject a destination that is not one light's 16-bit mesh address."""
+
+    if mesh_address is None:
+        return
+    if isinstance(mesh_address, bool) or not isinstance(mesh_address, int):
+        raise TelinkProtocolError("target mesh address must be an integer")
+    if mesh_address == BROADCAST_MESH_ADDRESS:
+        raise TelinkProtocolError("target mesh address 0xffff is the broadcast address and is not allowed")
+    if not 0 <= mesh_address < BROADCAST_MESH_ADDRESS:
+        raise TelinkProtocolError("target mesh address must be from 0x0000 through 0xfffe")
 
 
 @dataclass(frozen=True)
@@ -249,25 +263,38 @@ class BleMeshSession:
         self._info = target.info
         self._session_key = session_key
 
-    async def _send_once(self, opcode: int, parameters: bytes) -> AdvertisementInfo:
+    async def _send_once(
+        self, opcode: int, parameters: bytes, mesh_address: int | None = None
+    ) -> AdvertisementInfo:
         if not self.is_connected:
             await self._connect()
         assert self._client is not None
         assert self._info is not None
         assert self._session_key is not None
+        destination = self._info.mesh_address if mesh_address is None else mesh_address
         sequence = secrets.randbelow(0xFFFFFE) + 1
-        frame = build_command_frame(sequence, self._info.mesh_address, opcode, parameters)
+        frame = build_command_frame(sequence, destination, opcode, parameters)
+        # The frame is encrypted for the connected light even when another
+        # light's mesh address is the destination and the mesh relays it.
         command = encrypt_command_frame(self._session_key, self._info.address, frame)
         await self._client.write_gatt_char(COMMAND_UUID, command, response=True)
         return self._info
 
-    async def send(self, opcode: int, parameters: bytes) -> AdvertisementInfo:
-        """Send one command and invalidate a session if its link is dropped."""
+    async def send(
+        self, opcode: int, parameters: bytes, mesh_address: int | None = None
+    ) -> AdvertisementInfo:
+        """Send one command and invalidate a session if its link is dropped.
 
+        ``mesh_address`` addresses another light in the same mesh through the
+        connected one; by default the connected light's own address is used.
+        The broadcast address is refused so a command cannot reach every light.
+        """
+
+        validate_target_mesh_address(mesh_address)
         async with self._lock:
             was_connected = self.is_connected
             try:
-                return await self._send_once(opcode, parameters)
+                return await self._send_once(opcode, parameters, mesh_address)
             except TelinkProtocolError:
                 raise
             except BleMeshError:

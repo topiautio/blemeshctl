@@ -7,10 +7,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
 from blemeshctl import config
+from blemeshctl.client import DiscoveredLight
 from blemeshctl.cli import _format_light, build_parser, main, run
 from blemeshctl.config import ConfigError
 from blemeshctl.daemon import DaemonError, socket_path_for_address
@@ -161,126 +162,448 @@ class LightOptionTests(CliTestCase):
         daemons.request.assert_not_awaited()
 
 
-class GroupFanOutTests(CliTestCase):
+MESH = {DESK: 0x0101, SHELF: 0x0102, LAMP: 0x0103}
+
+
+class Runaway(BaseException):
+    """Stop a test whose program would otherwise never end (not an Exception)."""
+
+
+def advertised(address: str, rssi: int | None, mesh_address: int | None = None) -> DiscoveredLight:
+    mesh = MESH[address] if mesh_address is None else mesh_address
+    return DiscoveredLight(object(), AdvertisementInfo(address, "BleMesh", 0x0211, 0x0004, 0x01, mesh, rssi))
+
+
+class FakeMesh:
+    """One fake daemon per gateway MAC plus a fake advertising scan.
+
+    ``fail(gateway, target, opcode, count)`` returns an exception to raise for
+    a command request, where ``count`` is how many commands that gateway's
+    daemon has already accepted.
+    """
+
+    def __init__(
+        self,
+        scans: list[list[DiscoveredLight]],
+        fail: Callable[[str, int | None, int, int], BaseException | None] | None = None,
+        status: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self.scans = scans
+        self.fail = fail or (lambda gateway, target, opcode, count: None)
+        self.status = status or {}
+        self.events: list[tuple[Any, ...]] = []
+        self.payloads: list[dict[str, Any]] = []
+        self.accepted: dict[str, int] = {}
+        self.scan_count = 0
+        self.request = AsyncMock(side_effect=self._request)
+        self.sleep = AsyncMock(side_effect=self._sleep)
+        self.discover = AsyncMock(side_effect=self._discover)
+
+    async def _discover(self, timeout: float) -> list[DiscoveredLight]:
+        self.events.append(("scan", timeout))
+        self.scan_count += 1
+        return self.scans[min(self.scan_count, len(self.scans)) - 1]
+
+    async def _request(
+        self, payload: dict[str, Any], *, socket_path: Path | None = None, start_if_needed: bool = True
+    ) -> dict[str, Any]:
+        if payload["type"] == "status":
+            for address, response in self.status.items():
+                if socket_path == socket_path_for_address(address):
+                    return response
+            raise DaemonError("no keepalive daemon is running")
+        if len(self.payloads) > 200:
+            raise Runaway
+        gateway = payload["address"]
+        target = payload.get("target_mesh_address")
+        self.payloads.append(payload)
+        self.events.append(("send", gateway, target, payload["opcode"], payload["parameters"]))
+        assert socket_path == socket_path_for_address(gateway), "request went to another member's daemon"
+        failure = self.fail(gateway, target, payload["opcode"], self.accepted.get(gateway, 0))
+        if failure is not None:
+            raise failure
+        count = self.accepted.get(gateway, 0)
+        self.accepted[gateway] = count + 1
+        return {
+            "address": gateway,
+            "mesh_address": MESH[gateway],
+            "target_mesh_address": MESH[gateway] if target is None else target,
+            "reused": count > 0,
+            "idle_timeout": 60.0,
+        }
+
+    async def _sleep(self, seconds: float) -> None:
+        self.events.append(("wait", seconds))
+
+    def sends(self) -> list[tuple[str, int | None]]:
+        return [(event[1], event[2]) for event in self.events if event[0] == "send"]
+
+
+class GroupTestCase(CliTestCase):
     def setUp(self) -> None:
         super().setUp()
         config.add_alias("desk", DESK)
         config.add_group("office", ["desk", SHELF, LAMP])
 
-    def test_group_command_uses_each_members_own_daemon(self) -> None:
-        daemons = FakeDaemons()
+    def run_group(self, argv: list[str], mesh: FakeMesh) -> tuple[int, str, str]:
+        arguments = build_parser().parse_args(argv)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch("blemeshctl.cli.request_daemon", new=mesh.request),
+            patch("blemeshctl.cli.discover_lights", new=mesh.discover),
+            patch("blemeshctl.cli.asyncio.sleep", new=mesh.sleep),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            result = asyncio.run(run(arguments))
+        return result, stdout.getvalue(), stderr.getvalue()
 
-        result, output, error = self.run_cli(["off", "--light", "office"], daemons)
+    def script(self, text: str) -> str:
+        path = self.root / "scene.blemesh"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
 
-        self.assertEqual(result, 0)
-        self.assertEqual(error, "")
+
+def all_three(desk: int | None = -70, shelf: int | None = -40, lamp: int | None = -55) -> list[DiscoveredLight]:
+    return [advertised(DESK, desk), advertised(SHELF, shelf), advertised(LAMP, lamp)]
+
+
+class GroupRelayTests(GroupTestCase):
+    def test_one_scan_and_one_connection_through_the_strongest_member(self) -> None:
+        mesh = FakeMesh([all_three()])
+
+        result, output, error = self.run_group(["off", "--light", "office"], mesh)
+
+        self.assertEqual((result, error), (0, ""))
+        mesh.discover.assert_awaited_once_with(20.0)
+        # The gateway's own command uses the default destination; the other
+        # members are relayed by their advertised mesh addresses, in group order.
+        self.assertEqual(mesh.sends(), [(SHELF, None), (SHELF, MESH[DESK]), (SHELF, MESH[LAMP])])
+        self.assertNotIn("target_mesh_address", mesh.payloads[0])
+        for payload in mesh.payloads:
+            self.assertEqual(
+                (payload["address"], payload["opcode"], payload["parameters"]),
+                (SHELF, COMMAND_ON_OFF, off_parameters().hex()),
+            )
         self.assertEqual(
-            daemons.sends(),
-            [
-                ("send", address, COMMAND_ON_OFF, off_parameters().hex(), socket_path_for_address(address))
-                for address in (DESK, SHELF, LAMP)
-            ],
+            output,
+            f"Group office: connected through {SHELF} (mesh 0x0102; connection opened, kept for 60s after "
+            f"the last command); relaying to {DESK} (mesh 0x0101), {LAMP} (mesh 0x0103)\n"
+            f"off command sent to 3 lights in group office via {SHELF} "
+            "(relayed members are not individually acknowledged)\n",
         )
-        for address in (DESK, SHELF, LAMP):
-            self.assertIn(f"off command sent to {address}", output)
 
-    def test_group_script_sends_each_step_to_every_member_before_waiting(self) -> None:
-        script = self.root / "scene.blemesh"
-        script.write_text("on\nrepeat 2:\n  color ff0000\n  wait 1s\n", encoding="utf-8")
-        daemons = FakeDaemons()
+    def test_status_queries_never_start_a_daemon(self) -> None:
+        mesh = FakeMesh([all_three()])
 
-        result, _, _ = self.run_cli(["script", str(script), "--light", "office"], daemons)
+        self.run_group(["on", "--light", "office"], mesh)
+
+        status_calls = [call for call in mesh.request.await_args_list if call.args[0]["type"] == "status"]
+        self.assertEqual(len(status_calls), 3)
+        self.assertTrue(all(call.kwargs["start_if_needed"] is False for call in status_calls))
+
+    def test_unknown_rssi_ranks_last(self) -> None:
+        mesh = FakeMesh([all_three(desk=None, shelf=-90, lamp=None)])
+
+        self.assertEqual(self.run_group(["on", "--light", "office"], mesh)[0], 0)
+        self.assertEqual(mesh.sends()[0], (SHELF, None))
+
+    def test_script_steps_reach_every_member_before_the_next_step(self) -> None:
+        script = self.script("on\nrepeat 2:\n  color ff0000\n  wait 1s\n")
+        mesh = FakeMesh([all_three()])
+
+        result, output, _ = self.run_group(["script", script, "--light", "office"], mesh)
 
         self.assertEqual(result, 0)
-        steps = [(event[2], event[3]) if event[0] == "send" else event for event in daemons.events]
         on, red = (COMMAND_ON_OFF, on_parameters().hex()), (COMMAND_RGB, rgb_parameters(255, 0, 0, 100).hex())
-        self.assertEqual(steps, [on] * 3 + [red] * 3 + [("wait", 1.0)] + [red] * 3 + [("wait", 1.0)])
-        for index in range(0, 9, 3):
-            self.assertEqual({event[1] for event in daemons.sends()[index : index + 3]}, {DESK, SHELF, LAMP})
+        steps = [(event[3], event[4]) if event[0] == "send" else event for event in mesh.events]
+        self.assertEqual(
+            steps, [("scan", 20.0)] + [on] * 3 + [red] * 3 + [("wait", 1.0)] + [red] * 3 + [("wait", 1.0)]
+        )
+        targets = [(SHELF, None), (SHELF, MESH[DESK]), (SHELF, MESH[LAMP])]
+        self.assertEqual(mesh.sends(), targets * 3)
+        self.assertIn(
+            f"scene.blemesh:3: colour rgb #ff0000, brightness 100 command sent to 3 lights in group office "
+            f"via {SHELF} (relayed members are not individually acknowledged)",
+            output,
+        )
+        self.assertIn("scene.blemesh:4: waiting 1s", output)
 
-    def test_partial_failure_skips_the_failed_member_and_exits_nonzero(self) -> None:
-        script = self.root / "scene.blemesh"
-        script.write_text("on\nwait 1s\ncolor ff0000\noff\n", encoding="utf-8")
-        daemons = FakeDaemons({SHELF: DaemonError("Bluetooth connection dropped; command outcome is unknown")})
+    def test_member_not_advertising_fails_while_the_others_continue(self) -> None:
+        script = self.script("on\nwait 1s\noff\n")
+        mesh = FakeMesh([[advertised(DESK, -70), advertised(SHELF, -40)]])
 
-        result, output, error = self.run_cli(["script", str(script), "--light", "office"], daemons)
-
-        self.assertEqual(result, 1)
-        self.assertEqual(len(daemons.sends(SHELF)), 1)
-        self.assertEqual(len(daemons.sends(DESK)), 3)
-        self.assertEqual(len(daemons.sends(LAMP)), 3)
-        self.assertNotIn(f"sent to {SHELF}", output)
-        self.assertEqual(output.count(f"sent to {DESK}"), 3)
-        self.assertIn(f"blemeshctl: error: {SHELF}: Bluetooth connection dropped", error)
-        self.assertIn(f"1 of 3 lights in group office failed: {SHELF}", error)
-
-    def test_unexpected_member_exceptions_do_not_stop_other_members(self) -> None:
-        daemons = FakeDaemons({DESK: TimeoutError()})
-
-        result, output, error = self.run_cli(["on", "--light", "office"], daemons)
+        result, output, error = self.run_group(["script", script, "--light", "office"], mesh)
 
         self.assertEqual(result, 1)
-        self.assertIn(f"{DESK}: TimeoutError", error)
-        self.assertIn(f"on command sent to {SHELF}", output)
-        self.assertIn(f"on command sent to {LAMP}", output)
+        self.assertEqual(mesh.sends(), [(SHELF, None), (SHELF, MESH[DESK])] * 2)
+        self.assertNotIn(LAMP, output)
+        self.assertEqual(output.count("command sent to 2 lights in group office"), 2)
+        self.assertIn(
+            f"blemeshctl: error: {LAMP}: not seen advertising during the 20s scan, so its mesh address is "
+            "unknown; no commands will be sent to it",
+            error,
+        )
+        self.assertIn(f"1 of 3 lights in group office failed: {LAMP}", error)
 
-    def test_endless_group_program_stops_once_every_member_failed(self) -> None:
-        script = self.root / "loop.blemesh"
-        script.write_text("loop:\n  on\n  wait 1s\n", encoding="utf-8")
-        failure = DaemonError("not advertising", retryable=True)
-        daemons = FakeDaemons({DESK: failure, SHELF: failure, LAMP: failure})
+    def test_member_advertising_the_broadcast_address_is_never_addressed(self) -> None:
+        mesh = FakeMesh([[advertised(DESK, -70), advertised(SHELF, -40), advertised(LAMP, -30, 0xFFFF)]])
 
-        result, output, error = self.run_cli(["script", str(script), "--light", "office"], daemons)
+        result, _, error = self.run_group(["on", "--light", "office"], mesh)
 
         self.assertEqual(result, 1)
-        self.assertEqual(len(daemons.sends()), 3)
-        daemons.sleep.assert_not_awaited()
+        self.assertEqual(mesh.sends(), [(SHELF, None), (SHELF, MESH[DESK])])
+        self.assertIn(f"{LAMP}: advertises the broadcast mesh address 0xffff", error)
+        self.assertIn(f"1 of 3 lights in group office failed: {LAMP}", error)
+
+    def test_shared_mesh_address_is_warned_about(self) -> None:
+        stranger = "00:11:22:33:44:77"
+        mesh = FakeMesh([[*all_three(), advertised(stranger, -80, MESH[LAMP])]])
+
+        result, _, error = self.run_group(["on", "--light", "office"], mesh)
+
+        self.assertEqual(result, 0)
+        self.assertIn(f"warning: {LAMP} shares mesh 0x0103 with {stranger}", error)
+
+    def test_initial_connection_failure_fails_over_to_the_next_member(self) -> None:
+        unavailable = DaemonError(f"{SHELF} was not advertising", retryable=True)
+        mesh = FakeMesh(
+            [all_three()], fail=lambda gateway, target, opcode, count: unavailable if gateway == SHELF else None
+        )
+
+        result, output, error = self.run_group(["on", "--light", "office"], mesh)
+
+        self.assertEqual(result, 0)
+        # LAMP has the next strongest signal; SHELF stays a relayed member.
+        self.assertEqual(
+            mesh.sends(), [(SHELF, None), (LAMP, None), (LAMP, MESH[DESK]), (LAMP, MESH[SHELF])]
+        )
+        self.assertIn(f"blemeshctl: error: {SHELF}: {SHELF} was not advertising; trying {LAMP} as the gateway", error)
+        self.assertIn(f"on command sent to 3 lights in group office via {LAMP}", output)
+
+    def test_group_fails_when_no_member_accepts_a_connection(self) -> None:
+        script = self.script("loop:\n  on\n  wait 1s\n")
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: DaemonError("not advertising", retryable=True),
+        )
+
+        result, output, error = self.run_group(["script", script, "--light", "office"], mesh)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(mesh.sends(), [(SHELF, None), (LAMP, None), (DESK, None)])
+        mesh.sleep.assert_not_awaited()
         self.assertNotIn("sent", output)
-        self.assertIn("3 of 3 lights in group office failed", error)
+        self.assertIn("no member accepted a Bluetooth connection; nothing was sent", error)
+        self.assertIn(f"3 of 3 lights in group office failed: {DESK}, {SHELF}, {LAMP}", error)
 
-    def test_group_waits_for_connection_only_when_asked_explicitly(self) -> None:
-        script = self.root / "scene.blemesh"
-        script.write_text("on\n", encoding="utf-8")
+    def test_non_retryable_first_failure_stops_without_failover(self) -> None:
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: DaemonError(
+                "Bluetooth command failed: write rejected"
+            ),
+        )
+
+        result, output, error = self.run_group(["on", "--light", "office"], mesh)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(mesh.sends(), [(SHELF, None)])
+        self.assertEqual(output, "")
+        self.assertIn(f"outcome unknown for {SHELF}; not sent to {DESK}, {LAMP}", error)
+
+    def test_mid_run_gateway_failure_stops_the_whole_group(self) -> None:
+        script = self.script("on\nwait 1s\ncolor ff0000\noff\n")
+        dropped = DaemonError("Bluetooth connection dropped; command outcome is unknown, retry manually")
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: dropped
+            if opcode == COMMAND_RGB and target == MESH[DESK]
+            else None,
+        )
+
+        result, output, error = self.run_group(["script", script, "--light", "office"], mesh)
+
+        self.assertEqual(result, 1)
+        # Nothing follows the failed write: not LAMP's colour, nor any "off".
+        self.assertEqual(
+            mesh.sends(),
+            [(SHELF, None), (SHELF, MESH[DESK]), (SHELF, MESH[LAMP]), (SHELF, None), (SHELF, MESH[DESK])],
+        )
+        self.assertIn("scene.blemesh:1: on command sent to 3 lights", output)
+        self.assertNotIn("colour", output)
+        self.assertNotIn("off command", output)
+        self.assertIn(f"blemeshctl: error: {DESK} via {SHELF}: Bluetooth connection dropped", error)
+        self.assertIn(
+            f"group office stopped because the write through {SHELF} failed; no further commands will be sent. "
+            f"{script}:3: colour rgb #ff0000, brightness 100: sent to {SHELF}; outcome unknown for {DESK}; "
+            f"not sent to {LAMP}; 1 earlier step was sent to every addressed light",
+            error,
+        )
+        self.assertTrue(
+            error.endswith(
+                "blemeshctl: group office stopped before the program finished, so no light in it received "
+                "every step\n"
+            )
+        )
+        self.assertNotIn("lights in group office failed", error)
+
+    def test_reconnect_failure_after_delivery_does_not_fail_over(self) -> None:
+        script = self.script("on\nwait 1s\noff\n")
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: DaemonError("not advertising", retryable=True)
+            if count == 3
+            else None,
+        )
+
+        result, _, error = self.run_group(["script", script, "--light", "office"], mesh)
+
+        self.assertEqual(result, 1)
+        self.assertEqual({gateway for gateway, _ in mesh.sends()}, {SHELF})
+        self.assertEqual(len(mesh.sends()), 4)
+        self.assertIn(f"outcome unknown for {SHELF}; not sent to {DESK}, {LAMP}", error)
+
+    def test_unexpected_exception_is_an_unknown_outcome(self) -> None:
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: TimeoutError() if target == MESH[LAMP] else None,
+        )
+
+        result, output, error = self.run_group(["on", "--light", "office"], mesh)
+
+        self.assertEqual(result, 1)
+        self.assertNotIn("on command sent", output)
+        self.assertIn(f"blemeshctl: error: {LAMP} via {SHELF}: TimeoutError", error)
+        self.assertIn(f"sent to {SHELF}, {DESK}; outcome unknown for {LAMP}", error)
+        self.assertIn(f"1 of 3 lights in group office failed: {LAMP}", error)
+
+    def test_endless_program_stops_after_a_gateway_failure(self) -> None:
+        script = self.script("loop:\n  on\n  wait 1s\n")
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: DaemonError("dropped") if count == 6 else None,
+        )
+
+        mesh.scans = [[advertised(DESK, -70), advertised(SHELF, -40)]]
+
+        result, _, error = self.run_group(["script", script, "--light", "office"], mesh)
+
+        self.assertEqual(result, 1)
+        # Three full rounds of two lights, then the gateway's own write fails.
+        self.assertEqual(len(mesh.sends()), 7)
+        self.assertIn(f"blemeshctl: error: {SHELF}: dropped", error)
+        self.assertIn(
+            f"stopped before the program finished, so no light in it received every step; never addressed: {LAMP}",
+            error,
+        )
+
+    def test_already_connected_member_is_preferred_as_gateway(self) -> None:
+        status = {DESK: {"ok": True, "connected": True, "address": DESK, "mesh_address": MESH[DESK]}}
+        # A connected light may stop advertising, so DESK is missing from the scan.
+        mesh = FakeMesh([[advertised(SHELF, -40), advertised(LAMP, -55)]], status=status)
+        mesh.accepted[DESK] = 1
+
+        result, output, error = self.run_group(["on", "--light", "office"], mesh)
+
+        self.assertEqual((result, error), (0, ""))
+        self.assertEqual(mesh.sends(), [(DESK, None), (DESK, MESH[SHELF]), (DESK, MESH[LAMP])])
+        self.assertIn(f"connected through {DESK} (mesh 0x0101; connection reused", output)
+
+    def test_scan_failure_exits_one_without_commands(self) -> None:
+        mesh = FakeMesh([all_three()])
+        mesh.discover.side_effect = RuntimeError("No Bluetooth adapters found.")
+
+        result, output, error = self.run_group(["on", "--light", "office"], mesh)
+
+        self.assertEqual((result, output), (1, ""))
+        self.assertEqual(mesh.sends(), [])
+        self.assertIn("group office: Bluetooth scan failed: No Bluetooth adapters found.", error)
+
+    def test_group_waits_for_members_only_when_asked_explicitly(self) -> None:
+        script = self.script("on\n")
+        partial = [advertised(DESK, -70), advertised(SHELF, -40)]
 
         # Scripts normally wait, but a group does not unless asked.
-        daemons = FakeDaemons({LAMP: DaemonError("not advertising", retryable=True)})
-        result, output, _ = self.run_cli(["script", str(script), "--light", "office"], daemons)
+        mesh = FakeMesh([partial, all_three()])
+        result, output, _ = self.run_group(["script", script, "--light", "office"], mesh)
         self.assertEqual(result, 1)
-        self.assertEqual(len(daemons.sends(LAMP)), 1)
-        daemons.sleep.assert_not_awaited()
+        self.assertEqual(mesh.discover.await_count, 1)
+        mesh.sleep.assert_not_awaited()
         self.assertNotIn("Waiting for", output)
 
-        daemons = FakeDaemons({LAMP: DaemonError("not advertising", retryable=True)})
-        original = daemons._request
-
-        async def recover(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            if len(daemons.sends(LAMP)) == 1 and payload["address"] == LAMP:
-                daemons.failures.clear()
-            return await original(payload, **kwargs)
-
-        daemons.request = AsyncMock(side_effect=recover)
-        result, output, _ = self.run_cli(
-            ["script", str(script), "--light", "office", "--wait-for-connection"], daemons
+        mesh = FakeMesh([partial, all_three()])
+        result, output, _ = self.run_group(
+            ["script", script, "--light", "office", "--wait-for-connection"], mesh
         )
         self.assertEqual(result, 0)
-        self.assertEqual(len(daemons.sends(LAMP)), 2)
-        self.assertIn(f"Waiting for {LAMP}", output)
+        self.assertEqual(mesh.discover.await_count, 2)
+        self.assertIn(f"Waiting for {LAMP} in group office to advertise; press Ctrl-C to stop.", output)
+        self.assertEqual(mesh.sends(), [(SHELF, None), (SHELF, MESH[DESK]), (SHELF, MESH[LAMP])])
+
+    def test_explicit_wait_retries_the_gateway_connection(self) -> None:
+        mesh = FakeMesh(
+            [all_three()],
+            fail=lambda gateway, target, opcode, count: DaemonError("busy", retryable=True)
+            if len(mesh.payloads) <= 3
+            else None,
+        )
+
+        result, output, error = self.run_group(["on", "--light", "office", "--wait-for-connection"], mesh)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(mesh.sends()[:4], [(SHELF, None), (LAMP, None), (DESK, None), (SHELF, None)])
+        self.assertIn("Waiting for a member of group office to accept a Bluetooth connection", output)
+        self.assertEqual(error.count("blemeshctl: error:"), 3)
 
     def test_group_with_one_member_still_uses_group_semantics(self) -> None:
         config.add_group("solo", [SHELF])
-        daemons = FakeDaemons({SHELF: DaemonError("not advertising", retryable=True)})
 
-        result, _, error = self.run_cli(["on", "--light", "solo"], daemons)
+        mesh = FakeMesh([[advertised(SHELF, -40)]])
+        result, output, _ = self.run_group(["on", "--light", "solo"], mesh)
+        self.assertEqual(result, 0)
+        self.assertEqual(mesh.sends(), [(SHELF, None)])
+        self.assertTrue(output.endswith(f"on command sent to 1 light in group solo via {SHELF}\n"))
+        self.assertNotIn("relay", output)
 
+        mesh = FakeMesh([[]])
+        result, _, error = self.run_group(["on", "--light", "solo"], mesh)
         self.assertEqual(result, 1)
+        self.assertEqual(mesh.sends(), [])
         self.assertIn("1 of 1 lights in group solo failed", error)
 
-    def test_invalid_group_command_makes_no_daemon_request(self) -> None:
-        daemons = FakeDaemons()
+    def test_invalid_group_command_makes_no_request_or_scan(self) -> None:
+        mesh = FakeMesh([all_three()])
 
         with self.assertRaises(ValueError):
-            self.run_cli(["color", "00ff00", "--brightness", "0", "--light", "office"], daemons)
-        daemons.request.assert_not_awaited()
+            self.run_group(["color", "00ff00", "--brightness", "0", "--light", "office"], mesh)
+        mesh.request.assert_not_awaited()
+        mesh.discover.assert_not_awaited()
+
+    def test_scene_apply_to_a_group(self) -> None:
+        config.add_group("pair", [DESK, SHELF])
+        self.run_cli(["scene", "save", "evening", "--from-file", "-"], stdin="on\nwait 2s\noff\n")
+        mesh = FakeMesh([[advertised(DESK, -40)]])
+
+        result, output, error = self.run_group(["scene", "apply", "evening", "--light", "pair"], mesh)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(mesh.sends(), [(DESK, None), (DESK, None)])
+        self.assertEqual(
+            [payload["parameters"] for payload in mesh.payloads], [on_parameters().hex(), off_parameters().hex()]
+        )
+        self.assertIn("scene evening:2: waiting 2s", output)
+        self.assertIn(f"scene evening:3: off command sent to 1 light in group pair via {DESK}", output)
+        self.assertIn(f"1 of 2 lights in group pair failed: {SHELF}", error)
+
+    def test_single_light_paths_never_scan(self) -> None:
+        script = self.root / "scene.blemesh"
+        script.write_text("on\n", encoding="utf-8")
+        discover = AsyncMock()
+        with patch("blemeshctl.cli.discover_lights", new=discover):
+            self.run_cli(["on", "--light", "desk"])
+            self.run_cli(["script", str(script), "--address", SHELF])
+        discover.assert_not_awaited()
 
 
 class ConfigCommandTests(CliTestCase):
@@ -414,22 +737,6 @@ class SceneCommandTests(CliTestCase):
         with self.assertRaisesRegex(ScriptError, "scene evening:3: unknown instruction"):
             self.run_cli(["scene", "apply", "evening", "--address", DESK], daemons)
         daemons.request.assert_not_awaited()
-
-    def test_scene_apply_to_a_group_fans_out(self) -> None:
-        config.add_group("office", [DESK, SHELF])
-        self.run_cli(["scene", "save", "evening", "--from-file", "-"], stdin="on\nwait 2s\noff\n")
-        daemons = FakeDaemons({DESK: DaemonError("not advertising", retryable=True)})
-
-        result, output, error = self.run_cli(["scene", "apply", "evening", "--light", "office"], daemons)
-
-        self.assertEqual(result, 1)
-        self.assertEqual(len(daemons.sends(DESK)), 1)
-        self.assertEqual(
-            [event[3] for event in daemons.sends(SHELF)], [on_parameters().hex(), off_parameters().hex()]
-        )
-        self.assertIn("scene evening:2: waiting 2s", output)
-        self.assertIn(f"scene evening:3: off command sent to {SHELF}", output)
-        self.assertIn(f"1 of 2 lights in group office failed: {DESK}", error)
 
 
 if __name__ == "__main__":

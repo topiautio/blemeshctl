@@ -247,18 +247,31 @@ Names are stored in `lights.json` under `$XDG_CONFIG_HOME/blemeshctl`
 the file holds only names and MAC addresses. Mesh names and passwords stay
 command-line options.
 
-A group sends each command, or each script step, to every member before
-moving on, so the lights stay in step. Each member keeps its own retained
-connection, so `daemon status` and `daemon stop` take one member `--address`
-at a time. Unlike a single `--address`, a group doesn't wait for unavailable
-lights unless you pass `--wait-for-connection`. If you do, one unavailable
-member holds back every step.
+A group uses one Bluetooth connection, because some Bluetooth adapters drop
+the first light when a second connection opens. Before the first command,
+`blemeshctl` scans for the full `--scan-timeout` (20 seconds by default; lower
+it to make group commands faster) to find each member's mesh address. It then
+connects to one member, the gateway, and the mesh relays commands to the other
+members by their mesh addresses. The gateway is a member that already has a
+retained connection, or else the member with the strongest signal. The
+"connected through" line names it, and `daemon status` and `daemon stop` take
+that gateway's `--address`. If the gateway can't be connected, the next member
+is tried; this happens only before anything has been sent. Each command, or each
+script step, goes to every member before the next one, so the lights stay in
+step. Unlike a single `--address`, a group doesn't wait for unavailable lights
+unless you pass `--wait-for-connection`. If you do, it waits until every member
+is advertising and one accepts a connection.
 
-If a member fails, its error is printed and no further commands are sent to
-it, because the outcome of a failed write is unknown. The other members carry
-on. A "sent" line is printed only for lights that responded, and the command
-exits with status 1 if any member failed. A "sent" line means the command was
-delivered to the light's connection, not that the light was seen to change.
+A member that isn't advertising during the scan can't be addressed: its error
+is printed, it gets no commands, and the others carry on. Only the gateway
+acknowledges writes, so the "sent to N lights ... via GATEWAY" line means the
+commands reached the gateway's connection; relayed members are not individually
+acknowledged, and none of this means a light was seen to change. If a write
+through the gateway fails, its outcome is unknown and the connection is gone, so
+the whole group stops. `blemeshctl` reports which lights got the failed step,
+which didn't, and how many earlier steps everyone got. The command exits with
+status 1 if any member failed or the group stopped. Relaying was checked on two
+lights in the same mesh; members must be in radio range of each other.
 
 ## Scenes
 
@@ -321,7 +334,9 @@ Names, groups and scenes are stored only in the app's private storage, are
 excluded from backups, and never contain the mesh name or password. All group
 members must use the app's mesh credentials, and Android supports only a
 limited number of simultaneous connections (typically about seven lights).
-The CLI and the app keep separate name and scene stores.
+The CLI and the app keep separate name and scene stores. The app opens one
+connection per member; that worked on a phone with two lights, whereas the CLI
+relays through one connection.
 
 The app needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask
 for the Nearby devices permission; older versions ask for location instead,

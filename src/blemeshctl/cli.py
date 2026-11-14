@@ -6,11 +6,17 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from . import config
-from .client import DEFAULT_CONNECTION_SCAN_TIMEOUT, BleMeshError, discover_lights
+from .client import (
+    BROADCAST_MESH_ADDRESS,
+    DEFAULT_CONNECTION_SCAN_TIMEOUT,
+    BleMeshError,
+    discover_lights,
+)
 from .config import ConfigError, ResolvedLight
 from .daemon import DaemonError, request_daemon, socket_path_for_address
 from .protocol import (
@@ -59,10 +65,6 @@ class _WaitForConnectionAction(argparse.BooleanOptionalAction):
         namespace.wait_for_connection_explicit = True
 
 
-class _NoReachableMembers(Exception):
-    """Every member of a group has failed, so the program cannot continue."""
-
-
 def _add_connection_options(
     parser: argparse.ArgumentParser, *, wait_for_connection_default: bool = False
 ) -> None:
@@ -79,7 +81,7 @@ def _add_connection_options(
         "--scan-timeout",
         type=float,
         default=DEFAULT_CONNECTION_SCAN_TIMEOUT,
-        help="maximum advertising scan time in seconds",
+        help="maximum advertising scan time in seconds; a group always scans for this long to find its members",
     )
     parser.add_argument("--connect-timeout", type=float, default=20.0, help="GATT connection timeout in seconds")
     parser.add_argument(
@@ -129,8 +131,9 @@ def _add_group_parser(subcommands: argparse._SubParsersAction) -> None:
         "group",
         help="name a set of lights",
         description=(
-            "Name a set of lights so --light NAME sends every command to each member. "
-            f"Stored in lights.json under {_CONFIG_LOCATION}."
+            "Name a set of lights so --light NAME sends every command to each member. A group "
+            "connects to one advertising member and relays to the others by their advertised mesh "
+            f"addresses. Stored in lights.json under {_CONFIG_LOCATION}."
         ),
     )
     actions = group.add_subparsers(dest="group_action", required=True)
@@ -410,60 +413,273 @@ def _single_light_dispatcher(arguments: argparse.Namespace, socket_path: Path) -
     return dispatch
 
 
-class _GroupSender:
-    """Send each command to every group member that has not failed yet.
+@dataclass(frozen=True)
+class _GroupMember:
+    """A group member whose mesh address is known for this run."""
 
-    A failed write has an unknown outcome, so a member that fails once is never
-    retried or sent later steps; the remaining members carry on in step.
+    address: str
+    mesh_address: int
+    rssi: int | None
+    connected: bool
+
+
+@dataclass
+class _GroupPlan:
+    """Which members can be addressed, and why the others cannot."""
+
+    addressable: dict[str, _GroupMember] = field(default_factory=dict)
+    unaddressable: dict[str, str] = field(default_factory=dict)
+    permanent: set[str] = field(default_factory=set)
+
+
+async def _connected_mesh_address(address: str) -> int | None:
+    """Return the mesh address of a member its own daemon is connected to.
+
+    A connected light may stop advertising, so a scan alone would miss it.
     """
 
-    def __init__(self, arguments: argparse.Namespace, light: ResolvedLight) -> None:
-        # Unlike a single --address, a group waits only when asked explicitly:
-        # one unavailable member would otherwise stall every other member.
-        wait = arguments.wait_for_connection if arguments.wait_for_connection_explicit else False
-        self.light = light
-        self.failed: dict[str, Exception] = {}
-        self._members = [
-            (
-                address,
-                argparse.Namespace(**{**vars(arguments), "address": address, "wait_for_connection": wait}),
-                socket_path_for_address(address),
-            )
-            for address in light.addresses
-        ]
+    try:
+        response = await request_daemon(
+            {"type": "status"}, start_if_needed=False, socket_path=socket_path_for_address(address)
+        )
+    except (DaemonError, OSError, asyncio.TimeoutError):
+        return None
+    mesh_address = response.get("mesh_address")
+    if (
+        response.get("connected") is not True
+        or str(response.get("address", "")).upper() != address
+        or isinstance(mesh_address, bool)
+        or not isinstance(mesh_address, int)
+    ):
+        return None
+    return mesh_address
 
-    async def _send_one(
-        self,
-        address: str,
-        arguments: argparse.Namespace,
-        socket_path: Path,
-        opcode: int,
-        parameters: bytes,
-        description: str,
-        report: bool,
-    ) -> None:
-        try:
-            await _send_command(arguments, socket_path, opcode, parameters, description, report=report)
-        except Exception as exc:
-            self.failed[address] = exc
+
+async def _plan_group(arguments: argparse.Namespace, light: ResolvedLight) -> _GroupPlan:
+    """Find each member's mesh address with one scan plus daemon status queries."""
+
+    connected = {address: await _connected_mesh_address(address) for address in light.addresses}
+    try:
+        lights = await discover_lights(arguments.scan_timeout)
+    except Exception as exc:
+        raise _GroupScanFailed(_describe_error(exc)) from exc
+    seen = {found.info.address.upper(): found.info for found in lights}
+
+    plan = _GroupPlan()
+    for address in light.addresses:
+        mesh_address = connected[address]
+        if mesh_address is not None:
+            member = _GroupMember(address, mesh_address, None, connected=True)
+        elif address in seen:
+            info = seen[address]
+            member = _GroupMember(address, info.mesh_address, info.rssi, connected=False)
+        else:
+            plan.unaddressable[address] = (
+                f"not seen advertising during the {arguments.scan_timeout:g}s scan, "
+                "so its mesh address is unknown"
+            )
+            continue
+        if member.mesh_address == BROADCAST_MESH_ADDRESS:
+            plan.unaddressable[address] = f"advertises the broadcast mesh address 0x{BROADCAST_MESH_ADDRESS:04x}"
+            plan.permanent.add(address)
+            continue
+        plan.addressable[address] = member
+
+    for address, member in plan.addressable.items():
+        sharing = [
+            other
+            for other, info in seen.items()
+            if other != address and info.mesh_address == member.mesh_address
+        ]
+        if sharing:
             print(
-                f"blemeshctl: error: {address}: {_describe_error(exc)}; "
-                "no further commands will be sent to it",
+                f"blemeshctl: warning: {address} shares mesh 0x{member.mesh_address:04x} with "
+                f"{', '.join(sharing)}; commands to it also reach those lights",
                 file=sys.stderr,
             )
+    return plan
+
+
+def _gateway_order(plan: _GroupPlan, light: ResolvedLight) -> list[str]:
+    """Prefer an already-connected member, then the strongest signal."""
+
+    position = {address: index for index, address in enumerate(light.addresses)}
+
+    def key(member: _GroupMember) -> tuple[int, int, int, int]:
+        return (
+            0 if member.connected else 1,
+            0 if member.rssi is not None else 1,
+            -(member.rssi or 0),
+            position[member.address],
+        )
+
+    return [member.address for member in sorted(plan.addressable.values(), key=key)]
+
+
+class _GroupScanFailed(Exception):
+    """The Bluetooth scan that locates group members failed."""
+
+
+class _GroupStopped(Exception):
+    """The group run cannot continue; the details were already reported."""
+
+
+class _GroupRelay:
+    """Send every step through one gateway connection, relayed by mesh address.
+
+    Only the write to the gateway is acknowledged. A failed write has an
+    unknown outcome and loses the connection, so the whole group stops: there
+    is no retry and no change of gateway once a command has been delivered.
+    """
+
+    def __init__(
+        self, arguments: argparse.Namespace, light: ResolvedLight, plan: _GroupPlan, *, wait: bool
+    ) -> None:
+        self.arguments = arguments
+        self.light = light
+        self.plan = plan
+        self.wait = wait
+        self.gateway: str | None = None
+        self.steps_completed = 0
+        self.stopped = False
+        self.failed: set[str] = set(plan.unaddressable)
+        self._candidates = _gateway_order(plan, light)
+
+    def _request(self, gateway: str, opcode: int, parameters: bytes, target: int | None) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "type": "command",
+            "opcode": opcode,
+            "parameters": parameters.hex(),
+            "address": gateway,
+            "mesh_name": self.arguments.mesh_name,
+            "password": self.arguments.password,
+            "scan_timeout": self.arguments.scan_timeout,
+            "connect_timeout": self.arguments.connect_timeout,
+            "idle_timeout": self.arguments.keepalive_seconds,
+        }
+        # The gateway's own command keeps the daemon's default destination.
+        if target is not None:
+            request["target_mesh_address"] = target
+        return request
+
+    def _relayed(self, gateway: str) -> list[_GroupMember]:
+        return [member for address, member in self.plan.addressable.items() if address != gateway]
+
+    async def _open_gateway(self, opcode: int, parameters: bytes, description: str) -> None:
+        """Deliver the first command to a gateway's own light, failing over before any delivery."""
+
+        waiting_reported = False
+        while True:
+            for index, candidate in enumerate(self._candidates):
+                try:
+                    response = await request_daemon(
+                        self._request(candidate, opcode, parameters, None),
+                        socket_path=socket_path_for_address(candidate),
+                    )
+                except Exception as exc:
+                    if not isinstance(exc, DaemonError) or not exc.retryable:
+                        unsent = [member.address for member in self._relayed(candidate)]
+                        self._stop(candidate, exc, candidate, description, sent=[], unsent=unsent)
+                    # While waiting, report each candidate's error only once.
+                    if not waiting_reported:
+                        remaining = self._candidates[index + 1 :]
+                        hint = f"; trying {remaining[0]} as the gateway" if remaining else ""
+                        print(f"blemeshctl: error: {candidate}: {_describe_error(exc)}{hint}", file=sys.stderr)
+                    continue
+                self.gateway = candidate
+                self._report_gateway(response)
+                return
+            if not self.wait:
+                print(
+                    f"blemeshctl: group {self.light.name}: no member accepted a Bluetooth connection; "
+                    "nothing was sent",
+                    file=sys.stderr,
+                )
+                self.failed.update(self.light.addresses)
+                raise _GroupStopped
+            if not waiting_reported:
+                print(
+                    f"Waiting for a member of group {self.light.name} to accept a Bluetooth connection; "
+                    "press Ctrl-C to stop."
+                )
+                waiting_reported = True
+            await asyncio.sleep(1.0)
+
+    def _report_gateway(self, response: dict[str, Any]) -> None:
+        connection = "reused" if response["reused"] else "opened"
+        line = (
+            f"Group {self.light.name}: connected through {response['address']} "
+            f"(mesh 0x{response['mesh_address']:04x}; connection {connection}, "
+            f"kept for {response['idle_timeout']:g}s after the last command)"
+        )
+        relayed = self._relayed(response["address"])
+        if relayed:
+            line += "; relaying to " + ", ".join(
+                f"{member.address} (mesh 0x{member.mesh_address:04x})" for member in relayed
+            )
+        print(line)
+
+    def _stop(
+        self,
+        target: str,
+        error: BaseException,
+        gateway: str,
+        description: str,
+        *,
+        sent: list[str],
+        unsent: list[str],
+    ) -> NoReturn:
+        """Report a write with an unknown outcome and stop the whole group."""
+
+        # The failure belongs to the gateway link, even when relaying to another light.
+        culprit = target if target == gateway else f"{target} via {gateway}"
+        print(f"blemeshctl: error: {culprit}: {_describe_error(error)}", file=sys.stderr)
+        details = [f"sent to {', '.join(sent)}"] if sent else []
+        details.append(f"outcome unknown for {target}")
+        if unsent:
+            details.append(f"not sent to {', '.join(unsent)}")
+        if self.steps_completed:
+            steps = "step was" if self.steps_completed == 1 else "steps were"
+            details.append(f"{self.steps_completed} earlier {steps} sent to every addressed light")
+        print(
+            f"blemeshctl: group {self.light.name} stopped because the write through {gateway} failed; "
+            f"no further commands will be sent. {description}: {'; '.join(details)}",
+            file=sys.stderr,
+        )
+        self.stopped = True
+        self.failed.add(target)
+        self.failed.update(unsent)
+        raise _GroupStopped from error
 
     async def send(self, opcode: int, parameters: bytes, description: str, report: bool) -> None:
-        """Send one step to all reachable members before the program continues."""
+        """Send one step to every addressable member before the program continues."""
 
-        await asyncio.gather(
-            *(
-                self._send_one(address, member_arguments, socket_path, opcode, parameters, description, report)
-                for address, member_arguments, socket_path in self._members
-                if address not in self.failed
-            )
-        )
-        if len(self.failed) == len(self._members):
-            raise _NoReachableMembers
+        sent: list[str] = []
+        if self.gateway is None:
+            await self._open_gateway(opcode, parameters, description)
+            assert self.gateway is not None
+            sent.append(self.gateway)
+        gateway = self.gateway
+        relayed = self._relayed(gateway)
+        targets: list[tuple[str, int | None]] = [] if sent else [(gateway, None)]
+        targets += [(member.address, member.mesh_address) for member in relayed]
+        for index, (address, target) in enumerate(targets):
+            try:
+                await request_daemon(
+                    self._request(gateway, opcode, parameters, target),
+                    socket_path=socket_path_for_address(gateway),
+                )
+            except Exception as exc:
+                unsent = [later for later, _ in targets[index + 1 :]]
+                self._stop(address, exc, gateway, description, sent=sent, unsent=unsent)
+            sent.append(address)
+        self.steps_completed += 1
+        if report:
+            lights = "light" if len(sent) == 1 else "lights"
+            line = f"{description} command sent to {len(sent)} {lights} in group {self.light.name} via {gateway}"
+            if relayed:
+                line += " (relayed members are not individually acknowledged)"
+            print(line)
 
 
 async def _run_program(source: str, program: Sequence[ScriptStep], dispatch: CommandDispatcher) -> None:
@@ -510,22 +726,55 @@ async def _run_group(
     source: str | None,
     program: Sequence[ScriptStep] | None,
 ) -> int:
-    """Fan one command or one program run out to every member of a group."""
+    """Run one command or one program on every member through one connection."""
 
     command = _one_shot_command(arguments) if program is None else None
-    sender = _GroupSender(arguments, light)
-    try:
-        if command is not None:
-            await sender.send(*command, True)
-        else:
-            assert source is not None and program is not None
-            await _run_program(source, program, sender.send)
-    except _NoReachableMembers:
-        pass
-    if sender.failed:
+    # Unlike a single --address, a group waits only when asked explicitly:
+    # one unavailable member would otherwise stall every other member.
+    wait = arguments.wait_for_connection if arguments.wait_for_connection_explicit else False
+    waiting_reported = False
+    while True:
+        try:
+            plan = await _plan_group(arguments, light)
+        except _GroupScanFailed as exc:
+            print(f"blemeshctl: error: group {light.name}: Bluetooth scan failed: {exc}", file=sys.stderr)
+            return GROUP_FAILURE_EXIT_CODE
+        missing = [address for address in plan.unaddressable if address not in plan.permanent]
+        if not wait or not missing:
+            break
+        if not waiting_reported:
+            print(f"Waiting for {', '.join(missing)} in group {light.name} to advertise; press Ctrl-C to stop.")
+            waiting_reported = True
+        await asyncio.sleep(1.0)
+
+    for address, reason in plan.unaddressable.items():
+        print(f"blemeshctl: error: {address}: {reason}; no commands will be sent to it", file=sys.stderr)
+    relay = _GroupRelay(arguments, light, plan, wait=wait)
+    if plan.addressable:
+        try:
+            if command is not None:
+                await relay.send(*command, True)
+            else:
+                assert source is not None and program is not None
+                await _run_program(source, program, relay.send)
+        except _GroupStopped:
+            pass
+    if relay.stopped and program is not None:
+        # Later steps were never sent, so no member can be reported as complete.
+        line = (
+            f"blemeshctl: group {light.name} stopped before the program finished, "
+            "so no light in it received every step"
+        )
+        never = [address for address in light.addresses if address in plan.unaddressable]
+        if never:
+            line += f"; never addressed: {', '.join(never)}"
+        print(line, file=sys.stderr)
+        return GROUP_FAILURE_EXIT_CODE
+    if relay.failed:
+        failed = [address for address in light.addresses if address in relay.failed]
         print(
-            f"blemeshctl: {len(sender.failed)} of {len(light.addresses)} lights in group "
-            f"{light.name} failed: {', '.join(sender.failed)}",
+            f"blemeshctl: {len(failed)} of {len(light.addresses)} lights in group "
+            f"{light.name} failed: {', '.join(failed)}",
             file=sys.stderr,
         )
         return GROUP_FAILURE_EXIT_CODE
