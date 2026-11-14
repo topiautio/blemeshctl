@@ -16,6 +16,8 @@ daemon_pid=""
 test_address="00:00:00:00:00:00"
 
 cleanup() {
+    XDG_RUNTIME_DIR="$runtime_directory" XDG_CONFIG_HOME="$runtime_directory/config" \
+        "$binary" timers cancel --all >/dev/null 2>&1 || true
     XDG_RUNTIME_DIR="$runtime_directory" \
         "$binary" daemon stop --address "$test_address" >/dev/null 2>&1 || true
     XDG_RUNTIME_DIR="$runtime_directory" "$binary" daemon stop >/dev/null 2>&1 || true
@@ -73,3 +75,30 @@ status_output=$(
 grep -Fq "Keepalive daemon is starting a Bluetooth connection." <<<"$status_output"
 XDG_RUNTIME_DIR="$runtime_directory" \
     "$binary" daemon stop --address "$test_address" >/dev/null
+
+# Exercise the frozen timer runner: schedule a far-future timer (nothing connects
+# before it fires), list it, cancel it, and confirm the runner process exits.
+export XDG_RUNTIME_DIR="$runtime_directory" XDG_CONFIG_HOME="$runtime_directory/config"
+schedule_output=$("$binary" off --address "$test_address" --in 24h --mesh-name smoke-mesh --password smoke-secret)
+grep -Eq "^Scheduled [0-9a-f]{6}: off at [0-9:]{8} \(in 24h\)$" <<<"$schedule_output"
+timer_id=$(sed -E 's/^Scheduled ([0-9a-f]{6}):.*/\1/' <<<"$schedule_output")
+timer_record="$runtime_directory/blemeshctl/timers/$timer_id.json"
+[[ -f "$timer_record" ]]
+if grep -Fq -e smoke-mesh -e smoke-secret "$timer_record"; then
+    echo "timer record contains credentials" >&2
+    exit 1
+fi
+runner_pid=$(sed -nE 's/^ *"pid": ([0-9]+),?$/\1/p' "$timer_record")
+[[ -n "$runner_pid" ]] && kill -0 "$runner_pid"
+"$binary" timers | grep -Eq "^$timer_id  scheduled  in 2[34]h"
+"$binary" timers cancel "$timer_id" | grep -Fq "Cancelled $timer_id."
+for _ in {1..100}; do
+    kill -0 "$runner_pid" 2>/dev/null || break
+    sleep 0.05
+done
+if kill -0 "$runner_pid" 2>/dev/null; then
+    echo "standalone timer runner did not exit after cancel" >&2
+    exit 1
+fi
+"$binary" timers | grep -Eq "^$timer_id  cancelled"
+"$binary" timers clear | grep -Fq "Cleared 1 finished timer."
