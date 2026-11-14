@@ -82,6 +82,55 @@
             android:layout_height="wrap_content"
             android:text="@string/no_selected_device"
             android:textIsSelectable="true"/>
+        <Button
+            android:id="@+id/renameLightButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/rename_light"/>
+        <TextView
+            android:textStyle="bold"
+            android:textColor="@color/text_primary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/target_heading"/>
+        <TextView
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/target_help"/>
+        <Spinner
+            android:id="@+id/targetSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:contentDescription="@string/target_description"/>
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Button
+                android:id="@+id/newGroupButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="@string/new_group"
+                android:layout_weight="1"/>
+            <Button
+                android:id="@+id/editGroupButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="@string/edit_group"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"/>
+            <Button
+                android:id="@+id/deleteGroupButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="@string/delete_group"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"/>
+        </LinearLayout>
         <TextView
             android:textStyle="bold"
             android:textColor="@color/text_primary"
@@ -169,6 +218,37 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/set_white"/>
+        <TextView
+            android:textStyle="bold"
+            android:textColor="@color/text_primary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/scenes_heading"/>
+        <TextView
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/scenes_help"/>
+        <LinearLayout
+            android:id="@+id/sceneList"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"/>
+        <TextView
+            android:id="@+id/noScenesText"
+            android:textColor="@color/text_secondary"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/no_scenes"/>
+        <Button
+            android:id="@+id/saveSceneButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/save_scene"/>
         <TextView
             android:textStyle="bold"
             android:textColor="@color/text_primary"

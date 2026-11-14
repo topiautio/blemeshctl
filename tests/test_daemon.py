@@ -39,13 +39,15 @@ class FakeSession:
         self.is_connected = False
         self.info: AdvertisementInfo | None = None
         self.commands: list[tuple[int, bytes]] = []
+        self.targets: list[int | None] = []
         self.closed = False
         type(self).instances.append(self)
 
-    async def send(self, opcode: int, parameters: bytes) -> AdvertisementInfo:
+    async def send(self, opcode: int, parameters: bytes, mesh_address: int | None = None) -> AdvertisementInfo:
         self.is_connected = True
         self.info = INFO
         self.commands.append((opcode, parameters))
+        self.targets.append(mesh_address)
         return INFO
 
     async def close(self) -> None:
@@ -158,6 +160,56 @@ class KeepaliveDaemonTests(unittest.TestCase):
 
         with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
             asyncio.run(scenario())
+
+    def test_target_mesh_address_is_relayed_over_the_same_session(self) -> None:
+        async def scenario() -> tuple[dict[str, object], dict[str, object]]:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            default = await daemon.execute_command(command_request())
+            relayed = await daemon.execute_command(command_request(target_mesh_address=0x0168))
+            return default, relayed
+
+        with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+            default, relayed = asyncio.run(scenario())
+
+        self.assertEqual(len(FakeSession.instances), 1)
+        self.assertEqual(FakeSession.instances[0].targets, [None, 0x0168])
+        self.assertEqual(
+            (default["address"], default["mesh_address"], default["target_mesh_address"]),
+            (INFO.address, 0x0067, 0x0067),
+        )
+        self.assertEqual(
+            (relayed["address"], relayed["mesh_address"], relayed["target_mesh_address"], relayed["reused"]),
+            (INFO.address, 0x0067, 0x0168, True),
+        )
+
+    def test_rejects_invalid_target_mesh_addresses_before_connecting(self) -> None:
+        async def scenario(target: object) -> None:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            await daemon.execute_command(command_request(target_mesh_address=target))
+
+        for target, message in (
+            (0xFFFF, "broadcast"),
+            (0x10000, "0xfffe"),
+            (-1, "0xfffe"),
+            ("103", "integer"),
+            (103.0, "integer"),
+            (True, "integer"),
+        ):
+            with self.subTest(target=target), patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+                with self.assertRaisesRegex(DaemonError, message):
+                    asyncio.run(scenario(target))
+        self.assertEqual(FakeSession.instances, [])
+
+    def test_null_target_mesh_address_keeps_the_default_destination(self) -> None:
+        async def scenario() -> dict[str, object]:
+            daemon = KeepaliveDaemon(Path("/tmp/blemeshctl-test.sock"))
+            return await daemon.execute_command(command_request(target_mesh_address=None))
+
+        with patch("blemeshctl.daemon.BleMeshSession", FakeSession):
+            response = asyncio.run(scenario())
+
+        self.assertEqual(FakeSession.instances[0].targets, [None])
+        self.assertEqual(response["target_mesh_address"], INFO.mesh_address)
 
     def test_marks_an_initial_connection_failure_retryable(self) -> None:
         async def scenario() -> DaemonError:
