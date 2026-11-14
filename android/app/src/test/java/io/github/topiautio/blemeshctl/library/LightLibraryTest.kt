@@ -28,7 +28,7 @@ class LightNamesTests {
     @Test
     fun acceptsAndTrimsValidNames() {
         for (name in listOf("desk", "Desk 2", "living-room", "a_b", "9", "x".repeat(LightNames.MAX_NAME_LENGTH))) {
-            assertEquals(name, LightNames.validateName(" $name ", "Light"))
+            assertEquals(name, LightNames.validateName(" $name ", "Valon"))
         }
     }
 
@@ -36,8 +36,8 @@ class LightNamesTests {
     fun rejectsInvalidNames() {
         val cases = listOf("", "   ", "-desk", "_desk", " desk:1", "desk!", "työpöytä", "x".repeat(LightNames.MAX_NAME_LENGTH + 1))
         for (name in cases) {
-            val error = assertThrows(name, LibraryException::class.java) { LightNames.validateName(name, "Group") }
-            assertTrue(error.message.orEmpty().startsWith("Group name"))
+            val error = assertThrows(name, LibraryException::class.java) { LightNames.validateName(name, "Ryhmän") }
+            assertTrue(error.message.orEmpty().startsWith("Ryhmän nim"))
         }
     }
 }
@@ -122,7 +122,7 @@ class LightLibraryTests {
         val unknownAddress = assertThrows(LibraryException::class.java) {
             library.saveGroup("office", listOf("desk", LAMP))
         }
-        assertTrue(unknownAddress.message.orEmpty().contains("not a known light"))
+        assertTrue(unknownAddress.message.orEmpty().contains("ei ole tunnettu valo"))
         assertThrows(LibraryException::class.java) { library.saveGroup("office", listOf("nobody")) }
         assertThrows(LibraryException::class.java) { library.saveGroup("office", emptyList()) }
         assertThrows(LibraryException::class.java) { library.saveGroup("office", listOf("desk", DESK.lowercase())) }
@@ -143,7 +143,7 @@ class LightLibraryTests {
 
         val error = assertThrows(LibraryException::class.java) { library.saveGroup("house", listOf("office")) }
 
-        assertTrue(error.message.orEmpty().contains("cannot contain another group"))
+        assertTrue(error.message.orEmpty().contains("ei voi sisältää toista ryhmää"))
     }
 
     @Test

@@ -83,11 +83,11 @@ class LightLibrary(private val storage: LibraryStorage) {
             if (aliasByAddress.remove(normalizedAddress) != null) persist()
             return
         }
-        val name = LightNames.validateName(alias, "Light")
+        val name = LightNames.validateName(alias, "Valon")
         aliasByAddress.entries.firstOrNull { (otherAddress, otherAlias) ->
             otherAddress != normalizedAddress && LightNames.sameName(otherAlias, name)
-        }?.let { throw LibraryException("Light name '$name' is already used by ${it.key}") }
-        group(name)?.let { throw LibraryException("'$name' is already a group name") }
+        }?.let { throw LibraryException("Nimi '$name' on jo käytössä valolle ${it.key}") }
+        group(name)?.let { throw LibraryException("'$name' on jo ryhmän nimi") }
         aliasByAddress[normalizedAddress] = name
         persist()
     }
@@ -104,21 +104,21 @@ class LightLibrary(private val storage: LibraryStorage) {
         discoveredAddresses: Set<String> = emptySet(),
         replacing: String? = null,
     ): LightGroup {
-        val groupName = LightNames.validateName(name, "Group")
-        val replaced = replacing?.let { group(it) ?: throw LibraryException("Group '$it' does not exist") }
+        val groupName = LightNames.validateName(name, "Ryhmän")
+        val replaced = replacing?.let { group(it) ?: throw LibraryException("Ryhmää '$it' ei ole") }
         aliasByAddress.values.firstOrNull { LightNames.sameName(it, groupName) }?.let {
-            throw LibraryException("'$groupName' is already a light name")
+            throw LibraryException("'$groupName' on jo valon nimi")
         }
         group(groupName)?.takeIf { it != replaced }?.let {
-            throw LibraryException("Group '${it.name}' already exists")
+            throw LibraryException("Ryhmä '${it.name}' on jo olemassa")
         }
 
         val known = knownAddresses + discoveredAddresses.map { it.uppercase() }
         val resolved = members.map { member -> resolveLight(member, known) }
-        if (resolved.isEmpty()) throw LibraryException("Group '$groupName' needs at least one light")
+        if (resolved.isEmpty()) throw LibraryException("Ryhmässä '$groupName' pitää olla vähintään yksi valo")
         val duplicate = resolved.groupBy { it }.entries.firstOrNull { it.value.size > 1 }
         if (duplicate != null) {
-            throw LibraryException("${displayName(duplicate.key)} is listed more than once in group '$groupName'")
+            throw LibraryException("${displayName(duplicate.key)} on ryhmässä '$groupName' useammin kuin kerran")
         }
 
         val group = LightGroup(groupName, resolved)
@@ -129,7 +129,7 @@ class LightLibrary(private val storage: LibraryStorage) {
     }
 
     fun deleteGroup(name: String) {
-        groupsByKey.remove(LightNames.key(name)) ?: throw LibraryException("Group '$name' does not exist")
+        groupsByKey.remove(LightNames.key(name)) ?: throw LibraryException("Ryhmää '$name' ei ole")
         persist()
     }
 
@@ -142,7 +142,7 @@ class LightLibrary(private val storage: LibraryStorage) {
         if (LightNames.isAddress(target)) return listOf(LightNames.normalizeAddress(target))
         aliasByAddress.entries.firstOrNull { LightNames.sameName(it.value, target) }?.let { return listOf(it.key) }
         group(target)?.let { return it.members }
-        throw LibraryException("'${target.trim()}' is not a light name, group, or Bluetooth address")
+        throw LibraryException("'${target.trim()}' ei ole valon nimi, ryhmä tai Bluetooth-osoite")
     }
 
     /**
@@ -151,10 +151,10 @@ class LightLibrary(private val storage: LibraryStorage) {
      * The whole script must parse before anything is stored.
      */
     fun saveScene(name: String, script: String, replacing: String? = null): Scene {
-        val sceneName = LightNames.validateName(name, "Scene")
-        val replaced = replacing?.let { scene(it) ?: throw LibraryException("Scene '$it' does not exist") }
+        val sceneName = LightNames.validateName(name, "Kohtauksen")
+        val replaced = replacing?.let { scene(it) ?: throw LibraryException("Kohtausta '$it' ei ole") }
         scene(sceneName)?.takeIf { it != replaced }?.let {
-            throw LibraryException("Scene '${it.name}' already exists")
+            throw LibraryException("Kohtaus '${it.name}' on jo olemassa")
         }
         parseScene(sceneName, script)
         val scene = Scene(sceneName, script)
@@ -165,12 +165,12 @@ class LightLibrary(private val storage: LibraryStorage) {
     }
 
     fun renameScene(oldName: String, newName: String): Scene {
-        val existing = scene(oldName) ?: throw LibraryException("Scene '$oldName' does not exist")
+        val existing = scene(oldName) ?: throw LibraryException("Kohtausta '$oldName' ei ole")
         return saveScene(newName, existing.script, replacing = existing.name)
     }
 
     fun deleteScene(name: String) {
-        scenesByKey.remove(LightNames.key(name)) ?: throw LibraryException("Scene '$name' does not exist")
+        scenesByKey.remove(LightNames.key(name)) ?: throw LibraryException("Kohtausta '$name' ei ole")
         persist()
     }
 
@@ -179,7 +179,7 @@ class LightLibrary(private val storage: LibraryStorage) {
 
     private fun parseScene(name: String, script: String): List<ScriptStep> {
         if (script.length > MAX_SCENE_CHARACTERS) {
-            throw LibraryException("Scene '$name' is longer than $MAX_SCENE_CHARACTERS characters")
+            throw LibraryException("Kohtaus '$name' on pidempi kuin $MAX_SCENE_CHARACTERS merkkiä")
         }
         return BleMeshScript.parse(script, "scene '$name'")
     }
@@ -188,13 +188,13 @@ class LightLibrary(private val storage: LibraryStorage) {
         if (LightNames.isAddress(member)) {
             val address = LightNames.normalizeAddress(member)
             if (address !in known) {
-                throw LibraryException("$address is not a known light; scan for it or name it first")
+                throw LibraryException("$address ei ole tunnettu valo; skannaa se tai nimeä se ensin")
             }
             return address
         }
         aliasByAddress.entries.firstOrNull { LightNames.sameName(it.value, member) }?.let { return it.key }
-        if (group(member) != null) throw LibraryException("A group cannot contain another group ('${member.trim()}')")
-        throw LibraryException("'${member.trim()}' is not a known light name or Bluetooth address")
+        if (group(member) != null) throw LibraryException("Ryhmä ei voi sisältää toista ryhmää ('${member.trim()}')")
+        throw LibraryException("'${member.trim()}' ei ole tunnettu valon nimi tai Bluetooth-osoite")
     }
 
     /** Read stored entries, skipping any that are malformed or conflict with earlier ones. */
@@ -203,14 +203,14 @@ class LightLibrary(private val storage: LibraryStorage) {
             if (!key.startsWith(ALIAS_PREFIX)) continue
             runCatching {
                 val address = LightNames.normalizeAddress(key.removePrefix(ALIAS_PREFIX))
-                val alias = LightNames.validateName(value, "Light")
+                val alias = LightNames.validateName(value, "Valon")
                 if (aliasByAddress.values.none { LightNames.sameName(it, alias) }) aliasByAddress[address] = alias
             }
         }
         for ((key, value) in entries.toSortedMap()) {
             if (!key.startsWith(GROUP_PREFIX)) continue
             runCatching {
-                val name = LightNames.validateName(key.removePrefix(GROUP_PREFIX), "Group")
+                val name = LightNames.validateName(key.removePrefix(GROUP_PREFIX), "Ryhmän")
                 val members = value.split(',').filter { it.isNotBlank() }.map { LightNames.normalizeAddress(it) }.distinct()
                 if (members.isNotEmpty() && group(name) == null && aliasByAddress.values.none { LightNames.sameName(it, name) }) {
                     groupsByKey[LightNames.key(name)] = LightGroup(name, members)
@@ -220,7 +220,7 @@ class LightLibrary(private val storage: LibraryStorage) {
         for ((key, value) in entries.toSortedMap()) {
             if (!key.startsWith(SCENE_PREFIX)) continue
             runCatching {
-                val name = LightNames.validateName(key.removePrefix(SCENE_PREFIX), "Scene")
+                val name = LightNames.validateName(key.removePrefix(SCENE_PREFIX), "Kohtauksen")
                 parseScene(name, value)
                 if (scene(name) == null) scenesByKey[LightNames.key(name)] = Scene(name, value)
             }

@@ -38,7 +38,7 @@ object SceneText {
                 }
             }
         } catch (exception: TelinkProtocolException) {
-            throw LibraryException(exception.message ?: "invalid light controls")
+            throw LibraryException(exception.message ?: "virheelliset valon asetukset")
         }
     }
 

@@ -16,7 +16,7 @@ object LightNames {
     fun normalizeAddress(text: String): String {
         val normalized = text.trim().uppercase(Locale.ROOT)
         if (!ADDRESS.matches(normalized)) {
-            throw LibraryException("'${text.trim()}' is not a Bluetooth address such as AA:BB:CC:DD:EE:FF")
+            throw LibraryException("'${text.trim()}' ei ole Bluetooth-osoite, esimerkiksi AA:BB:CC:DD:EE:FF")
         }
         return normalized
     }
@@ -24,7 +24,7 @@ object LightNames {
     fun isAddress(text: String): Boolean = ADDRESS.matches(text.trim().uppercase(Locale.ROOT))
 
     /**
-     * Return the trimmed name, or fail with a message naming [kind].
+     * Return the trimmed name, or fail with a message that starts with [kind] (a Finnish genitive such as `Ryhmän`).
      *
      * Names start with a letter or digit and may then contain letters, digits,
      * spaces, underscores, and hyphens. A colon is never allowed, so a name can
@@ -32,14 +32,14 @@ object LightNames {
      */
     fun validateName(text: String, kind: String): String {
         val name = text.trim()
-        if (name.isEmpty()) throw LibraryException("$kind name must not be empty")
+        if (name.isEmpty()) throw LibraryException("$kind nimi ei saa olla tyhjä")
         if (name.length > MAX_NAME_LENGTH) {
-            throw LibraryException("$kind name must be at most $MAX_NAME_LENGTH characters")
+            throw LibraryException("$kind nimi saa olla enintään $MAX_NAME_LENGTH merkkiä")
         }
         if (!NAME.matches(name)) {
             throw LibraryException(
-                "$kind name '$name' must start with a letter or digit and contain only letters, digits, " +
-                    "spaces, '_' and '-'",
+                "$kind nimen '$name' pitää alkaa kirjaimella tai numerolla, ja siinä saa olla vain " +
+                    "kirjaimia A–Z, numeroita, välilyöntejä sekä merkit '_' ja '-'",
             )
         }
         return name
