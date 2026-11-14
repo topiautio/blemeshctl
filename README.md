@@ -299,6 +299,55 @@ scene does not add an `on`; whether those commands power on a light that is off
 has not been checked on a device, so add an `on` line with `--from-file` if
 you need it.
 
+## Timers and fades
+
+Add `--in DURATION` to `on`, `off`, `color`, `white`, `script`, or `scene apply`
+to send the command later:
+
+```bash
+blemeshctl off --light bedroom --in 30m
+blemeshctl scene apply night --light room --in 1h30m
+```
+
+DURATION is a number with units such as `30s`, `20m`, `2h`, or `1h30m` (1 second
+to 24 hours). The command is checked immediately, and a background process of
+your login session waits until the time arrives. Nothing connects to the light
+before then, and the connection is released shortly after the last step so your
+phone app is not blocked. Timers do not survive a reboot or logout. A timer that
+fires late, for example after the computer was asleep, still runs and notes how
+late it was in its outcome.
+
+`fade` dims a light gradually:
+
+```bash
+blemeshctl fade --color ff8800 --over 20m --light bedroom --in 1h
+blemeshctl fade --white 2700 --from 60 --to 10 --over 15m --light bedroom
+```
+
+Lights cannot report their state, so you must tell `fade` which colour to dim
+with `--color` or `--white`; it assumes the light is already on (no `on` is
+sent). `--from` defaults to 100 and `--to` to `off`, which dims to brightness 1
+and then turns the light off. A fade sends at most one step every 2 seconds.
+During a fade the light stays connected between steps, which blocks other
+devices such as the phone app. Between steps more than 2 minutes apart, the
+connection is released and reopened for the next step.
+
+Unattended runs do not stop at the first error: a step whose write fails is
+skipped and the later steps are still sent, and a final `off` is retried up to
+three times. The result is `done` only if every step was acknowledged, `partial`
+if some steps failed, or `failed` if nothing was delivered. For a group, a step
+that reached only some of the members counts as partial, and relayed members are
+not individually acknowledged. None of this means a light was seen to change.
+
+```bash
+blemeshctl timers                # list scheduled, running, and finished timers
+blemeshctl timers cancel ID      # stop one (or --all)
+blemeshctl timers clear          # remove finished records
+```
+
+A cancelled fade leaves the light at its last brightness. Mesh names and
+passwords are never written to timer records.
+
 ## Android app
 
 The `android/` directory holds a native Android app that uses the same Telink

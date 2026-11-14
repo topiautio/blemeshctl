@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from blemeshctl import standalone
 from blemeshctl.daemon import INTERNAL_DAEMON_ARGUMENT
+from blemeshctl.timers import INTERNAL_TIMER_ARGUMENT
 
 
 class StandaloneEntrypointTests(unittest.TestCase):
@@ -40,3 +41,18 @@ class StandaloneEntrypointTests(unittest.TestCase):
 
         daemon_main.assert_called_once_with()
         cli_main.assert_not_called()
+
+    def test_internal_timer_argument_runs_the_embedded_timer_runner(self) -> None:
+        arguments = ["blemeshctl", INTERNAL_TIMER_ARGUMENT, "/run/blemeshctl/timers/abc123.json"]
+        with (
+            patch.object(sys, "argv", arguments),
+            patch("blemeshctl.standalone.cli.main") as cli_main,
+            patch("blemeshctl.standalone.daemon.main") as daemon_main,
+            patch("blemeshctl.standalone.timers.main") as timer_main,
+        ):
+            standalone.main()
+            self.assertEqual(sys.argv, ["blemeshctl", "/run/blemeshctl/timers/abc123.json"])
+
+        timer_main.assert_called_once_with()
+        cli_main.assert_not_called()
+        daemon_main.assert_not_called()

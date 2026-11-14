@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import config
+from . import config, timers
 from .client import (
     BROADCAST_MESH_ADDRESS,
     DEFAULT_CONNECTION_SCAN_TIMEOUT,
@@ -99,6 +100,30 @@ def _add_connection_options(
         type=float,
         default=60.0,
         help="keep the authenticated Bluetooth connection open after the command (default: 60)",
+    )
+
+
+def _fade_target(value: str) -> int | None:
+    """Parse ``--to``: a brightness from 1 through 100, or ``off`` (returned as None)."""
+
+    if value.lower() == "off":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--to must be a brightness from 1 through 100, or 'off'") from None
+
+
+def _add_delay_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--in",
+        dest="delay_seconds",
+        type=timers.duration_argument,
+        metavar="DURATION",
+        help=(
+            "do it later, such as 30s, 20m, 2h, or 1h30m (1s to 24h): a background process of this login "
+            "session waits, then sends it; nothing connects before then. List or cancel with 'timers'"
+        ),
     )
 
 
@@ -199,6 +224,7 @@ def _add_scene_parser(subcommands: argparse._SubParsersAction) -> None:
     )
     apply.add_argument("name")
     _add_connection_options(apply, wait_for_connection_default=True)
+    _add_delay_option(apply)
 
     actions.add_parser("list", help="list saved scenes")
     show = actions.add_parser("show", help="print a scene's script text")
@@ -219,11 +245,13 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (("on", "turn a light on"), ("off", "turn a light off")):
         command = subcommands.add_parser(name, help=help_text)
         _add_connection_options(command)
+        _add_delay_option(command)
 
     color = subcommands.add_parser("color", help="set a solid RGB colour")
     color.add_argument("rgb", help="six hexadecimal digits, for example 00ff00")
     color.add_argument("--brightness", type=int, default=100, help="brightness from 1 through 100")
     _add_connection_options(color)
+    _add_delay_option(color)
 
     white = subcommands.add_parser("white", help="switch to the white LEDs instead of an RGB colour")
     white.add_argument(
@@ -237,14 +265,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     white.add_argument("--brightness", type=int, default=100, help="brightness from 1 through 100")
     _add_connection_options(white)
+    _add_delay_option(white)
 
     script = subcommands.add_parser("script", help="run a light-control script file")
     script.add_argument("script", type=Path, help="path to a script file")
     _add_connection_options(script, wait_for_connection_default=True)
+    _add_delay_option(script)
 
+    fade = subcommands.add_parser(
+        "fade",
+        help="gradually dim a light, optionally turning it off at the end",
+        description=(
+            "Dim a light from --from to --to over --over by sending a series of colour or white commands "
+            "(at most one step per 2 seconds). Lights cannot report their state, so you must say which "
+            "colour to dim with --color or --white. No 'on' is sent first; a fade assumes the light is "
+            "already on at --from, and --to off (the default) dims to brightness 1 and then sends 'off'. "
+            "With --in, a background process runs the fade later (see 'timers')."
+        ),
+    )
+    fade_colour = fade.add_mutually_exclusive_group()
+    fade_colour.add_argument("--color", metavar="RGB", help="colour to dim, such as ff8800")
+    fade_colour.add_argument(
+        "--white",
+        type=int,
+        nargs="?",
+        const=WHITE_NEUTRAL_KELVIN,
+        metavar="KELVIN",
+        help=f"dim the white LEDs at an optional temperature (default {WHITE_NEUTRAL_KELVIN})",
+    )
+    fade.add_argument("--from", dest="fade_from", type=int, default=100, metavar="N", help="starting brightness 1-100 (default 100)")
+    fade.add_argument(
+        "--to", dest="fade_to", type=_fade_target, default=None, metavar="N|off",
+        help="final brightness 1-100, or off (default) to dim to 1 and then turn off",
+    )
+    fade.add_argument("--over", dest="fade_over", type=timers.duration_argument, required=True, metavar="DURATION", help="how long the fade lasts, such as 20m (1s to 24h)")
+    _add_connection_options(fade, wait_for_connection_default=True)
+    _add_delay_option(fade)
     _add_alias_parser(subcommands)
     _add_group_parser(subcommands)
     _add_scene_parser(subcommands)
+    timers.add_timers_parser(subcommands)
 
     daemon = subcommands.add_parser("daemon", help="inspect or stop a local keepalive connection")
     daemon.add_argument("action", choices=("status", "stop"), help="daemon action")
@@ -781,6 +841,150 @@ async def _run_group(
     return 0
 
 
+class _TimerBackend:
+    """Deliver one timer step through the single-light or group send path.
+
+    A group's relay is rebuilt (rescan, new gateway) after any failure, because
+    a failed write loses the gateway connection and its outcome is unknown.
+    """
+
+    def __init__(self, record: dict[str, Any], credentials: dict[str, str]) -> None:
+        connection = record["connection"]
+        addresses = tuple(record["addresses"])
+        self.light = ResolvedLight(record["target"], addresses, True) if record["is_group"] else None
+        self.arguments = argparse.Namespace(
+            address=None if self.light or not addresses else addresses[0],
+            mesh_name=credentials["mesh_name"],
+            password=credentials["password"],
+            scan_timeout=connection["scan_timeout"],
+            connect_timeout=connection["connect_timeout"],
+            keepalive_seconds=60.0,
+            # An unattended step must not stall the steps after it.
+            wait_for_connection=False,
+            wait_for_connection_explicit=False,
+        )
+        self.relay: _GroupRelay | None = None
+
+    async def send(self, opcode: int, parameters: bytes, description: str, keepalive: float) -> None:
+        self.arguments.keepalive_seconds = keepalive
+        if self.light is None:
+            try:
+                await _send_command(
+                    self.arguments,
+                    socket_path_for_address(self.arguments.address),
+                    opcode,
+                    parameters,
+                    description,
+                    report=False,
+                )
+            except Exception as exc:
+                raise timers.StepError(_describe_error(exc)) from exc
+            return
+        await self._send_group(opcode, parameters, description)
+
+    async def _send_group(self, opcode: int, parameters: bytes, description: str) -> None:
+        assert self.light is not None
+        if self.relay is None:
+            try:
+                plan = await _plan_group(self.arguments, self.light)
+            except Exception as exc:
+                raise timers.StepError(f"group {self.light.name}: Bluetooth scan failed: {_describe_error(exc)}") from exc
+            if not plan.addressable:
+                raise timers.StepError(f"group {self.light.name}: no member was seen advertising")
+            self.relay = _GroupRelay(self.arguments, self.light, plan, wait=False)
+        relay = self.relay
+        try:
+            await relay.send(opcode, parameters, description, False)
+        except Exception as exc:
+            self.relay = None
+            # _GroupStopped only says the details were printed; the cause has them.
+            cause = exc.__cause__ if isinstance(exc, _GroupStopped) else exc
+            reason = _describe_error(cause) if cause is not None else "no member accepted a Bluetooth connection"
+            raise timers.StepError(f"group {self.light.name}: {reason}") from exc
+        if relay.failed:
+            missing = [address for address in self.light.addresses if address in relay.failed]
+            raise timers.StepError(f"not delivered to {', '.join(missing)}", partial=True)
+
+
+def timer_backend(record: dict[str, Any], credentials: dict[str, str]) -> timers.StepBackend:
+    """Backend factory used by the background timer runner."""
+
+    return _TimerBackend(record, credentials)
+
+
+def _scheduled_program(arguments: argparse.Namespace) -> tuple[str, str, str]:
+    """Return program text, a short description, and an error-message source label."""
+
+    command = arguments.command
+    if command in ("on", "off"):
+        text, description, source = f"{command}\n", command, command
+    elif command == "color":
+        text = config.scene_text(color=arguments.rgb, brightness=arguments.brightness)
+        description, source = text.strip(), "color"
+    elif command == "white":
+        text = config.scene_text(white=arguments.temperature, brightness=arguments.brightness)
+        description, source = text.strip(), "white"
+    elif command == "script":
+        source = str(arguments.script)
+        try:
+            text = arguments.script.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ScriptError(f"{source}: could not read script: {exc}") from exc
+        description = f"script {arguments.script.name}"
+    elif command == "scene":
+        text = config.read_scene(arguments.name)
+        source, description = config.scene_source(arguments.name), f"scene {arguments.name}"
+    elif command == "fade":
+        text, description = _fade_text(arguments)
+        source = "fade"
+    else:
+        raise AssertionError(f"unhandled command {command!r}")
+    parse_script(text, source)
+    return text, description, source
+
+
+def _fade_text(arguments: argparse.Namespace) -> tuple[str, str]:
+    fields = dict(
+        color=arguments.color,
+        white=arguments.white,
+        start=arguments.fade_from,
+        end=arguments.fade_to,
+        over_seconds=arguments.fade_over,
+    )
+    return timers.fade_program_text(**fields), timers.fade_description(**fields)
+
+
+def _schedule_command(arguments: argparse.Namespace) -> int:
+    """Compile the command, store a timer record, and start its background runner."""
+
+    text, description, _ = _scheduled_program(arguments)
+    light_name = getattr(arguments, "light", None)
+    if light_name is not None:
+        registry = config.LightRegistry() if config.is_address(light_name) else config.load_lights()
+        light = config.resolve_light(registry, light_name)
+        target, addresses, is_group = light_name, list(light.addresses), light.is_group
+    elif arguments.address is not None:
+        target, addresses, is_group = arguments.address, [arguments.address], False
+    else:
+        target, addresses, is_group = "(any light)", [], False
+    record = timers.schedule_timer(
+        program_text=text,
+        description=description,
+        target=target,
+        addresses=addresses,
+        is_group=is_group,
+        delay_seconds=arguments.delay_seconds,
+        connection={"scan_timeout": arguments.scan_timeout, "connect_timeout": arguments.connect_timeout},
+        credentials={"mesh_name": arguments.mesh_name, "password": arguments.password},
+    )
+    fires = time.strftime("%H:%M:%S", time.localtime(record["fire_at"]))
+    print(
+        f"Scheduled {record['id']}: {description} at {fires} "
+        f"(in {timers.format_duration(arguments.delay_seconds)})"
+    )
+    return 0
+
+
 async def run(arguments: argparse.Namespace) -> int:
     if arguments.command == "scan":
         lights = await discover_lights(arguments.timeout)
@@ -797,6 +1001,10 @@ async def run(arguments: argparse.Namespace) -> int:
         return _run_group_command(arguments)
     if arguments.command == "scene" and arguments.scene_action != "apply":
         return _run_scene_command(arguments)
+    if arguments.command == "timers":
+        return timers.run_timers_command(arguments)
+    if getattr(arguments, "delay_seconds", None) is not None:
+        return _schedule_command(arguments)
 
     # Compile before locating or starting the daemon, so a bad final line
     # cannot result in earlier valid lines being sent to a light.
@@ -806,6 +1014,9 @@ async def run(arguments: argparse.Namespace) -> int:
     elif arguments.command == "scene":
         source = config.scene_source(arguments.name)
         program = config.load_scene(arguments.name)
+    elif arguments.command == "fade":
+        source = "fade"
+        program = parse_script(_fade_text(arguments)[0], source)
     else:
         source, program = None, None
 
@@ -861,7 +1072,7 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         raise SystemExit(asyncio.run(run(arguments)))
-    except (BleMeshError, ConfigError, DaemonError, ScriptError, TelinkProtocolError) as exc:
+    except (BleMeshError, ConfigError, DaemonError, ScriptError, TelinkProtocolError, timers.TimerError) as exc:
         parser.exit(2, f"blemeshctl: error: {exc}\n")
     except KeyboardInterrupt:
         parser.exit(130, "blemeshctl: interrupted\n")
