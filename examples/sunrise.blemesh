@@ -1,0 +1,56 @@
+# Sunrise demo: a 2-minute wake-up ramp using RGB colour commands only.
+# It starts at deep red (ff0000, brightness 1), passes through orange (ff3c00 at 30%,
+# ff7a14 at 60%) and amber (ffa648 at 85%), and ends at a warm white (ffb060,
+# brightness 100). A colour command turns a light that is off on by itself, and the
+# light stays on at full brightness at the end; there is no final off.
+# Generated with blemeshctl.timers.sunrise_program_text(120). For a real alarm, use
+# 'blemeshctl sunrise --at 07:00 --over 30m', which runs the same ramp unattended.
+color ff0000 1
+wait 5s
+color ff0800 4
+wait 5s
+color ff1100 6
+wait 5s
+color ff1900 9
+wait 5s
+color ff2100 12
+wait 5s
+color ff2a00 14
+wait 5s
+color ff3200 17
+wait 5s
+color ff3a00 19
+wait 5s
+color ff4302 24
+wait 5s
+color ff4c05 29
+wait 5s
+color ff5408 34
+wait 5s
+color ff5d0b 38
+wait 5s
+color ff650d 43
+wait 5s
+color ff6e10 48
+wait 5s
+color ff7713 53
+wait 5s
+color ff7e19 58
+wait 5s
+color ff8622 63
+wait 5s
+color ff8d2b 68
+wait 5s
+color ff9433 73
+wait 5s
+color ff9c3c 78
+wait 5s
+color ffa345 83
+wait 5s
+color ffa84c 88
+wait 5s
+color ffaa53 92
+wait 5s
+color ffad59 96
+wait 5s
+color ffb060 100
