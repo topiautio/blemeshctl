@@ -387,9 +387,37 @@ The CLI and the app keep separate name and scene stores. The app opens one
 connection per member; that worked on a phone with two lights, whereas the CLI
 relays through one connection.
 
+The **Ajastin** section schedules a delayed command for the selected light or
+group: Päälle, Pois, a saved scene, or a Himmennys (a brightness fade that ends
+with the light switched off, or at a chosen percentage). Enter the delay as
+`30s`, `20m`, `2h` or `1h30m` (1 second to 24 hours). A fade needs a colour
+source because lights cannot report their current state: the colour wheel's
+selection or neutral white. The generated fade matches the CLI's `fade`, step
+for step.
+
+Timers run in a foreground service, so they continue with the app closed and the
+screen off. The ongoing notification shows the number of active timers and a
+**Peruuta kaikki** action; each finished timer posts a result notification,
+including the first error when something failed. Like the CLI, an unattended run
+skips a failed step and still tries the later ones, and retries the final `off`
+up to three times. A result of done means the lights accepted the writes; the
+app does not confirm the physical state.
+
+Timers are kept in memory only: they are lost if the phone restarts or the app
+is force-stopped. A light accepts one Bluetooth connection at a time, so while a
+timer targets a light the app releases its own connection to it and does not
+reconnect until the timer has finished. Commands sent by hand to that light in
+the meantime may interfere with the timer. Timers were checked with the screen
+off and with the phone forced into deep idle while on USB power; a long wait on
+battery, where the CPU can truly suspend, may fire late.
+
 The app needs Android 8.0 or newer with Bluetooth LE. Android 12 and newer ask
 for the Nearby devices permission; older versions ask for location instead,
-which Android requires for Bluetooth scanning.
+which Android requires for Bluetooth scanning. Timers add the foreground-service
+permissions (`FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_CONNECTED_DEVICE`),
+`POST_NOTIFICATIONS` on Android 13 and newer for the timer notifications (timers
+still run if you decline), and `WAKE_LOCK`, which keeps the CPU awake only while
+a timer is sending commands.
 
 Signed APKs are attached to GitHub Releases whose tags start with `android-v`,
 for example `android-v0.5.0`. These releases are not marked as latest, so the

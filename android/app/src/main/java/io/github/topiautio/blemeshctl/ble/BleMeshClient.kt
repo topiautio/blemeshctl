@@ -73,6 +73,10 @@ class BleMeshClient(
         val commandCharacteristic: BluetoothGattCharacteristic,
     )
 
+    /** The address of the open authenticated connection, or null when there is none. */
+    val connectedAddress: String?
+        get() = session?.takeIf { it.connection.isConnected }?.address
+
     val connectionDescription: String
         get() = session
             ?.takeIf { it.connection.isConnected }
@@ -90,13 +94,19 @@ class BleMeshClient(
         ConnectionReceipt(active.info, reusedConnection, active.connectedDirectlyFromCache)
     }
 
-    /** Send one command, reusing the open connection when it still matches. */
+    /**
+     * Send one command, reusing the open connection when it still matches.
+     *
+     * [keepAliveMillis] replaces the constructor's idle timeout for the connection left open
+     * after this command; timers use it to hold a light only as long as the next step needs.
+     */
     suspend fun send(
         address: String,
         cachedInfo: AdvertisementInfo?,
         credentials: MeshCredentials,
         opcode: Int,
         parameters: ByteArray,
+        keepAliveMillis: Long = idleTimeoutMillis,
     ): CommandReceipt = mutex.withLock {
         val (active, reusedConnection) = acquireSession(address, cachedInfo, credentials)
         val frame = TelinkProtocol.buildCommandFrame(
@@ -118,7 +128,7 @@ class BleMeshClient(
                 exception,
             )
         }
-        scheduleIdleClose()
+        scheduleIdleClose(keepAliveMillis)
         CommandReceipt(active.info, reusedConnection, active.connectedDirectlyFromCache)
     }
 
@@ -241,10 +251,10 @@ class BleMeshClient(
         }
     }
 
-    private fun scheduleIdleClose() {
+    private fun scheduleIdleClose(timeoutMillis: Long = idleTimeoutMillis) {
         idleJob?.cancel()
         idleJob = scope.launch {
-            delay(idleTimeoutMillis)
+            delay(timeoutMillis)
             mutex.withLock {
                 closeSession()
                 idleJob = null
