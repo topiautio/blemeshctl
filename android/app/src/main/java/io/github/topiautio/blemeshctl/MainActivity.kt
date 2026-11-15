@@ -147,6 +147,9 @@ class MainActivity : Activity() {
     private lateinit var timerSceneSpinner: Spinner
     private lateinit var timerDelayInput: EditText
     private lateinit var timerFadeGroup: View
+    private lateinit var timerSunriseGroup: View
+    private lateinit var timerWakeInput: EditText
+    private lateinit var timerSunriseDurationInput: EditText
     private lateinit var timerFadeWhiteRadio: RadioButton
     private lateinit var timerFadeDurationInput: EditText
     private lateinit var timerFadeFromInput: EditText
@@ -249,6 +252,9 @@ class MainActivity : Activity() {
         timerSceneSpinner = findViewById(R.id.timerSceneSpinner)
         timerDelayInput = findViewById(R.id.timerDelayInput)
         timerFadeGroup = findViewById(R.id.timerFadeGroup)
+        timerSunriseGroup = findViewById(R.id.timerSunriseGroup)
+        timerWakeInput = findViewById(R.id.timerWakeInput)
+        timerSunriseDurationInput = findViewById(R.id.timerSunriseDurationInput)
         timerFadeWhiteRadio = findViewById(R.id.timerFadeWhiteRadio)
         timerFadeDurationInput = findViewById(R.id.timerFadeDurationInput)
         timerFadeFromInput = findViewById(R.id.timerFadeFromInput)
@@ -1367,7 +1373,7 @@ class MainActivity : Activity() {
 
     // --- Timers -------------------------------------------------------------------------------
 
-    private val timerActions = listOf(TimerAction.ON, TimerAction.OFF, TimerAction.SCENE, TimerAction.FADE)
+    private val timerActions = listOf(TimerAction.ON, TimerAction.OFF, TimerAction.SCENE, TimerAction.FADE, TimerAction.SUNRISE)
 
     private fun configureTimerSection() {
         val labels = listOf(
@@ -1375,6 +1381,7 @@ class MainActivity : Activity() {
             getString(R.string.turn_off),
             getString(R.string.timer_action_scene),
             getString(R.string.timer_action_fade),
+            getString(R.string.timer_action_sunrise),
         )
         timerActionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
@@ -1384,6 +1391,9 @@ class MainActivity : Activity() {
                 val action = timerActions.getOrNull(position)
                 timerSceneSpinner.visibility = if (action == TimerAction.SCENE) View.VISIBLE else View.GONE
                 timerFadeGroup.visibility = if (action == TimerAction.FADE) View.VISIBLE else View.GONE
+                timerSunriseGroup.visibility = if (action == TimerAction.SUNRISE) View.VISIBLE else View.GONE
+                // A sunrise is timed by its wake time, not by a delay.
+                timerDelayInput.visibility = if (action == TimerAction.SUNRISE) View.GONE else View.VISIBLE
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -1409,7 +1419,8 @@ class MainActivity : Activity() {
     }
 
     private fun scheduleTimer() {
-        listOf(timerDelayInput, timerFadeDurationInput, timerFadeFromInput, timerFadeToInput).forEach { it.error = null }
+        listOf(timerDelayInput, timerFadeDurationInput, timerFadeFromInput, timerFadeToInput, timerWakeInput, timerSunriseDurationInput)
+            .forEach { it.error = null }
         val action = timerActions.getOrNull(timerActionSpinner.selectedItemPosition) ?: return
         val scene = timerScenes.getOrNull(timerSceneSpinner.selectedItemPosition)
         val rgb = colorWheel.selectedRgb
@@ -1423,6 +1434,8 @@ class MainActivity : Activity() {
             fadeDurationText = timerFadeDurationInput.text.toString(),
             fromText = timerFadeFromInput.text.toString(),
             toText = timerFadeToInput.text.toString(),
+            wakeText = timerWakeInput.text.toString(),
+            sunriseDurationText = timerSunriseDurationInput.text.toString(),
         )
         when (val result = ScheduleBuilder.build(input, System.currentTimeMillis())) {
             is ScheduleResult.Invalid -> {
@@ -1432,6 +1445,8 @@ class MainActivity : Activity() {
                     ScheduleField.FADE_DURATION -> timerFadeDurationInput
                     ScheduleField.FADE_FROM -> timerFadeFromInput
                     ScheduleField.FADE_TO -> timerFadeToInput
+                    ScheduleField.WAKE_TIME -> timerWakeInput
+                    ScheduleField.SUNRISE_DURATION -> timerSunriseDurationInput
                     ScheduleField.SCENE, ScheduleField.FADE_COLOUR -> null
                 }
                 if (field != null) {

@@ -430,6 +430,15 @@ source because lights cannot report their current state: the colour wheel's
 selection or neutral white. The generated fade matches the CLI's `fade`, step
 for step.
 
+**Auringonnousu** is a wake-up ramp like the CLI's `sunrise`: enter a wake time
+as 24-hour `HH:MM` and an optional length (1 minute to 6 hours, default 30
+minutes). The ramp ends at the next occurrence of that time, so the delay field
+is not used. If less time than the length remains, the ramp is shortened; with
+under a minute left it is refused. The light stays on at warm white afterwards.
+The program matches the CLI's `sunrise` exactly (checked against shared test
+vectors). Keep a backup alarm: it is lost if the phone restarts or the app is
+force-stopped.
+
 Timers run in a foreground service, so they continue with the app closed and the
 screen off. The ongoing notification shows the number of active timers and a
 **Peruuta kaikki** action; each finished timer posts a result notification,

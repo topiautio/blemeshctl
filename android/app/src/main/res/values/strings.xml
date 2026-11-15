@@ -60,6 +60,14 @@
     <string name="timer_help">Ajastin ajetaan taustapalvelussa, joten sovelluksen voi sulkea ja näytön sammuttaa. Ajastimet eivät säily, jos puhelin käynnistetään uudelleen tai sovellus lopetetaan väkisin. Valo hyväksyy vain yhden yhteyden: kun kohteen ajastin on aktiivinen, sovellus vapauttaa kohteen valojen yhteydet eikä avaa niitä itse uudelleen. Jos lähetät samalle valolle komentoja käsin ajastimen aikana, ne voivat häiritä ajastimen lähetystä.</string>
     <string name="timer_action_scene">Kohtaus</string>
     <string name="timer_action_fade">Himmennys</string>
+    <string name="timer_action_sunrise">Auringonnousu</string>
+    <string name="timer_wake_hint">Herätysaika 24 h muodossa, esim. 07:00</string>
+    <string name="timer_sunrise_duration_hint">Kesto (1 min – 6 h, oletus 30m)</string>
+    <string name="timer_sunrise_help">Valo himmenee syvänpunaisesta lämpimän valkoiseen ja saavuttaa täyden kirkkauden herätysaikana. Valo jää päälle. Muista pitää myös varaherätys.</string>
+    <string name="timer_desc_sunrise">Auringonnousu %1$s, valmis %2$s</string>
+    <string name="timer_error_time">Anna aika muodossa HH:MM, esim. 07:00.</string>
+    <string name="timer_error_sunrise_range">Auringonnousun kesto on 1 min – 6 h.</string>
+    <string name="timer_error_too_close">Herätysaikaan on alle minuutti. Valitse myöhäisempi aika tai lyhyempi kesto.</string>
     <string name="timer_no_scene_choice">Ei tallennettuja kohtauksia</string>
     <string name="timer_delay_hint">Viive (1 s – 24 h), esim. 30m</string>
     <string name="timer_fade_wheel">Värirullan valittu väri</string>

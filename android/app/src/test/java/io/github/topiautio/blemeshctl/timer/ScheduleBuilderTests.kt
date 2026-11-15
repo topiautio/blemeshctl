@@ -130,4 +130,67 @@ class ScheduleBuilderTests {
         // The delay is checked before the fade fields.
         assertEquals(ScheduleField.DELAY, invalid(fade(duration = "bad").copy(delayText = "")).field)
     }
+
+    private val helsinki = java.time.ZoneId.of("Europe/Helsinki")
+
+    private fun sunrise(wake: String = "07:00", over: String = "", clock: Long = at(2026, 11, 14, 21, 0)) =
+        ScheduleBuilder.build(
+            ScheduleInput(
+                action = TimerAction.SUNRISE,
+                delayText = "",
+                wakeText = wake,
+                sunriseDurationText = over,
+                zone = helsinki,
+            ),
+            clock,
+        )
+
+    private fun at(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int = 0) =
+        java.time.LocalDateTime.of(year, month, day, hour, minute, second).atZone(helsinki).toInstant().toEpochMilli()
+
+    @Test
+    fun sunriseStartsThirtyMinutesBeforeTheWakeTimeByDefault() {
+        val plan = (sunrise() as ScheduleResult.Ready).plan
+        assertEquals(at(2026, 11, 15, 6, 30), plan.fireAtMillis)
+        assertEquals((plan.fireAtMillis - at(2026, 11, 14, 21, 0)) / 1000, plan.delaySeconds)
+        assertEquals(TimerAction.SUNRISE, plan.summary.action)
+        assertEquals(1800L, plan.summary.fadeSeconds)
+        assertEquals(at(2026, 11, 15, 7, 0), plan.summary.wakeMillis)
+        assertEquals(SunriseProgram.text(1800), plan.programText)
+    }
+
+    @Test
+    fun sunriseHonoursTheChosenLengthAndShortensALateStart() {
+        val full = (sunrise(over = "1h") as ScheduleResult.Ready).plan
+        assertEquals(at(2026, 11, 15, 6, 0), full.fireAtMillis)
+
+        val late = (sunrise(clock = at(2026, 11, 15, 6, 50)) as ScheduleResult.Ready).plan
+        assertEquals(at(2026, 11, 15, 6, 50), late.fireAtMillis)
+        assertEquals(600L, late.summary.fadeSeconds)
+        assertEquals(0L, late.delaySeconds)
+    }
+
+    @Test
+    fun sunriseProblemsPointAtTheirFields() {
+        for (text in listOf("", "7", "24:00", "07:60", "7:5", "ab:cd", "07:00pm")) {
+            val result = sunrise(wake = text) as ScheduleResult.Invalid
+            assertEquals(text, ScheduleField.WAKE_TIME to ScheduleProblem.BAD_TIME, result.field to result.problem)
+        }
+        val cases = mapOf(
+            "abc" to ScheduleProblem.INVALID_DURATION,
+            "30s" to ScheduleProblem.SUNRISE_RANGE,
+            "59s" to ScheduleProblem.SUNRISE_RANGE,
+            "6h1s" to ScheduleProblem.SUNRISE_RANGE,
+            "25h" to ScheduleProblem.TOO_LONG,
+        )
+        for ((text, problem) in cases) {
+            val result = sunrise(over = text) as ScheduleResult.Invalid
+            assertEquals(text, ScheduleField.SUNRISE_DURATION to problem, result.field to result.problem)
+        }
+        assertTrue(sunrise(over = "1m") is ScheduleResult.Ready)
+        assertTrue(sunrise(over = "6h") is ScheduleResult.Ready)
+
+        val close = sunrise(clock = at(2026, 11, 15, 6, 59, 30)) as ScheduleResult.Invalid
+        assertEquals(ScheduleField.WAKE_TIME to ScheduleProblem.TOO_CLOSE, close.field to close.problem)
+    }
 }

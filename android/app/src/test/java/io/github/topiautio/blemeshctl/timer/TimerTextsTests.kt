@@ -26,6 +26,13 @@ class TimerTextsTests {
     )
 
     @Test
+    fun describesASunriseWithItsLengthAndWakeTime() {
+        // 2026-11-15 05:00:00 UTC
+        val summary = TimerSummary(TimerAction.SUNRISE, fadeSeconds = 1800, wakeMillis = 1_794_718_800_000L)
+        assertEquals(text.expect(R.string.timer_desc_sunrise, "30m", "15.11. klo 05:00"), texts.describe(summary))
+    }
+
+    @Test
     fun describesEveryAction() {
         assertEquals(text.expect(R.string.timer_desc_on), texts.describe(TimerSummary(TimerAction.ON)))
         assertEquals(text.expect(R.string.timer_desc_off), texts.describe(TimerSummary(TimerAction.OFF)))
