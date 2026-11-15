@@ -102,3 +102,30 @@ if kill -0 "$runner_pid" 2>/dev/null; then
 fi
 "$binary" timers | grep -Eq "^$timer_id  cancelled"
 "$binary" timers clear | grep -Fq "Cleared 1 finished timer."
+
+# Sunrise goes through the same record and runner: schedule far in the future,
+# list it, check the record holds no credentials, and cancel it.
+sunrise_output=$("$binary" sunrise --in 24h --over 2m --address "$test_address" --mesh-name smoke-mesh --password smoke-secret)
+grep -Eq "^Scheduled [0-9a-f]{6}: sunrise 2m ending [0-9:]{5} at [0-9:]{8} \(in 24h\)$" <<<"$(head -n1 <<<"$sunrise_output")"
+grep -Eq "^Wake time: [A-Z][a-z]{2} [0-9]{1,2} [A-Z][a-z]{2} [0-9:]{5}$" <<<"$sunrise_output"
+sunrise_id=$(sed -nE '1s/^Scheduled ([0-9a-f]{6}):.*/\1/p' <<<"$sunrise_output")
+sunrise_record="$runtime_directory/blemeshctl/timers/$sunrise_id.json"
+[[ -f "$sunrise_record" ]]
+if grep -Fq -e smoke-mesh -e smoke-secret "$sunrise_record"; then
+    echo "sunrise timer record contains credentials" >&2
+    exit 1
+fi
+grep -Fq "color ffb060 100" "$sunrise_record"
+sunrise_pid=$(sed -nE 's/^ *"pid": ([0-9]+),?$/\1/p' "$sunrise_record")
+[[ -n "$sunrise_pid" ]] && kill -0 "$sunrise_pid"
+"$binary" timers | grep -Eq "^$sunrise_id  scheduled  in 2[34]h.*sunrise 2m ending"
+"$binary" timers cancel "$sunrise_id" | grep -Fq "Cancelled $sunrise_id."
+for _ in {1..100}; do
+    kill -0 "$sunrise_pid" 2>/dev/null || break
+    sleep 0.05
+done
+if kill -0 "$sunrise_pid" 2>/dev/null; then
+    echo "standalone sunrise runner did not exit after cancel" >&2
+    exit 1
+fi
+"$binary" timers clear | grep -Fq "Cleared 1 finished timer."

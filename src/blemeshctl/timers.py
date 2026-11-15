@@ -41,7 +41,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -222,6 +224,158 @@ def fade_program_text(
     if end is None:
         lines.append("off")
     return "\n".join(lines) + "\n"
+
+
+# --- sunrise ---------------------------------------------------------------
+
+SUNRISE_DEFAULT_SECONDS = 30 * 60
+SUNRISE_MIN_SECONDS = 60
+SUNRISE_MAX_SECONDS = 6 * 60 * 60
+SUNRISE_MIN_STEP_SECONDS = 5.0
+SUNRISE_MAX_INTERVALS = 300
+# (fraction of the ramp, RGB colour, brightness): deep red, orange, warm white.
+# The final colour was picked on the tested strip: the RGB white ffd6aa looked bluish, so the
+# ramp ends at the warmer ffb060.
+SUNRISE_KEYFRAMES: tuple[tuple[float, tuple[int, int, int], int], ...] = (
+    (0.00, (0xFF, 0x00, 0x00), 1),
+    (0.30, (0xFF, 0x3C, 0x00), 20),
+    (0.60, (0xFF, 0x7A, 0x14), 55),
+    (0.85, (0xFF, 0xA6, 0x48), 85),
+    (1.00, (0xFF, 0xB0, 0x60), 100),
+)
+_TIME_OF_DAY_PATTERN = re.compile(r"([0-9]{1,2}):([0-9]{2})")
+
+
+def sunrise_over_argument(text: str) -> int:
+    """argparse ``type=`` for ``sunrise --over``: 1 minute through 6 hours."""
+
+    seconds = duration_argument(text)
+    if not SUNRISE_MIN_SECONDS <= seconds <= SUNRISE_MAX_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"--over {text!r} is out of range: a sunrise lasts from 1m to 6h"
+        )
+    return seconds
+
+
+def time_of_day_argument(text: str) -> tuple[int, int]:
+    """argparse ``type=`` for ``--at``: 24-hour ``HH:MM`` as (hour, minute)."""
+
+    match = _TIME_OF_DAY_PATTERN.fullmatch(text.strip())
+    if match is None or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        raise argparse.ArgumentTypeError(
+            f"invalid time {text!r}: use 24-hour HH:MM, such as 07:00"
+        )
+    return int(match.group(1)), int(match.group(2))
+
+
+def sunrise_frame(fraction: float) -> tuple[tuple[int, int, int], int]:
+    """Return the interpolated RGB colour and brightness at ``fraction`` of the ramp."""
+
+    fraction = min(1.0, max(0.0, fraction))
+    for (start, color_a, level_a), (end, color_b, level_b) in zip(SUNRISE_KEYFRAMES, SUNRISE_KEYFRAMES[1:]):
+        if fraction <= end:
+            weight = (fraction - start) / (end - start)
+            color = tuple(
+                min(255, max(0, int(a + (b - a) * weight + 0.5))) for a, b in zip(color_a, color_b)
+            )
+            level = min(100, max(1, int(level_a + (level_b - level_a) * weight + 0.5)))
+            return (color[0], color[1], color[2]), level
+    raise AssertionError("keyframes cover the whole ramp")
+
+
+def sunrise_description(over_seconds: int, wake_clock: str) -> str:
+    """Return the short description shown by ``timers``."""
+
+    return f"sunrise {format_duration(over_seconds)} ending {wake_clock}"
+
+
+def sunrise_program_text(over_seconds: int, *, description: str | None = None) -> str:
+    """Generate a sunrise ramp as ``.blemesh`` text using only existing instructions.
+
+    Only RGB ``color`` commands are used (a ``color`` turns a light that is off on
+    by itself, and the white channel's temperature is not trustworthy). The ramp
+    has at most :data:`SUNRISE_MAX_INTERVALS` + 1 steps, at least
+    :data:`SUNRISE_MIN_STEP_SECONDS` apart, and the last step is the final
+    keyframe at the end of the ramp. A step identical to its predecessor is
+    dropped and its wait merged into the previous one. There is no final ``off``.
+    """
+
+    if not SUNRISE_MIN_SECONDS <= over_seconds <= SUNRISE_MAX_SECONDS:
+        raise TimerError("a sunrise lasts from 1m to 6h")
+    intervals = max(1, int(over_seconds // max(SUNRISE_MIN_STEP_SECONDS, over_seconds / SUNRISE_MAX_INTERVALS)))
+    spacing = over_seconds / intervals
+    steps: list[tuple[str, float]] = []  # (command, wait after it)
+    for index in range(intervals + 1):
+        (red, green, blue), level = sunrise_frame(index / intervals)
+        command = f"color {red:02x}{green:02x}{blue:02x} {level}"
+        if steps and steps[-1][0] == command:
+            steps[-1] = (command, steps[-1][1] + spacing)
+        else:
+            steps.append((command, spacing))
+    lines = [f"# {description or 'sunrise ' + format_duration(over_seconds)}"]
+    for index, (command, wait) in enumerate(steps):
+        lines.append(command)
+        if index < len(steps) - 1:
+            lines.append(f"wait {_format_wait(wait)}")
+    return "\n".join(lines) + "\n"
+
+
+@dataclass(frozen=True)
+class SunrisePlan:
+    """When a ``sunrise --at`` ramp starts and ends."""
+
+    start_at: float
+    wake_at: float
+    over_seconds: int
+    compressed: bool
+
+
+def next_local_time(hour: int, minute: int, now: float) -> float:
+    """Return the first instant after ``now`` at which the local clock reads hour:minute.
+
+    The wall time is converted as a naive local datetime, so the C library
+    applies DST. A repeated time (autumn) resolves to the first occurrence still
+    ahead; a skipped time (spring) resolves to the instant the library gives it.
+    """
+
+    today = datetime.fromtimestamp(now).date()
+    for offset in range(3):
+        day = today + timedelta(days=offset)
+        candidates = []
+        for fold in (0, 1):
+            naive = datetime.combine(day, dt_time(hour, minute, fold=fold))
+            stamp = naive.timestamp()
+            seen = datetime.fromtimestamp(stamp)
+            if (seen.hour, seen.minute) == (hour, minute):
+                candidates.append(stamp)
+        if not candidates:  # a time skipped by the spring clock change
+            candidates.append(datetime.combine(day, dt_time(hour, minute)).timestamp())
+        future = [stamp for stamp in candidates if stamp > now]
+        if future:
+            return min(future)
+    raise TimerError(f"could not find the next {hour:02d}:{minute:02d}")
+
+
+def plan_sunrise_at(hour: int, minute: int, over_seconds: int, now: float) -> SunrisePlan:
+    """Plan a ramp that ends at the next ``hour:minute``, compressing it if it must start late."""
+
+    wake_at = next_local_time(hour, minute, now)
+    start_at = wake_at - over_seconds
+    if start_at >= now:
+        return SunrisePlan(start_at, wake_at, over_seconds, False)
+    remaining = int(wake_at - now)
+    if remaining < SUNRISE_MIN_SECONDS:
+        raise TimerError(
+            "too close to the wake time for a ramp; use a shorter --over or a later time"
+        )
+    return SunrisePlan(now, wake_at, remaining, True)
+
+
+def format_wake_time(timestamp: float) -> str:
+    """Format a wake time as ``Sun 15 Nov 07:00``."""
+
+    moment = datetime.fromtimestamp(timestamp)
+    return f"{moment:%a} {moment.day} {moment:%b %H:%M}"
 
 
 # --- program analysis ------------------------------------------------------

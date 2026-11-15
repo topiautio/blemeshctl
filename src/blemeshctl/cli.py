@@ -301,6 +301,36 @@ def build_parser() -> argparse.ArgumentParser:
     fade.add_argument("--over", dest="fade_over", type=timers.duration_argument, required=True, metavar="DURATION", help="how long the fade lasts, such as 20m (1s to 24h)")
     _add_connection_options(fade, wait_for_connection_default=True)
     _add_delay_option(fade)
+    sunrise = subcommands.add_parser(
+        "sunrise",
+        help="schedule a gradual wake-up light",
+        description=(
+            "Schedule a ramp from deep red through orange to a warm white that ends at full brightness. "
+            "--at HH:MM is the wake time, when the ramp ends; --in DURATION instead starts the ramp after "
+            "that delay. A background process of this login session runs it (see 'timers'; lost on "
+            "reboot or logout). The ramp uses RGB colour commands only, which turn the light on by "
+            "themselves. The runner holds the light's Bluetooth connection for the whole ramp, so the phone "
+            "app cannot control the light until it ends. The light stays on at full brightness afterwards."
+        ),
+    )
+    sunrise_when = sunrise.add_mutually_exclusive_group(required=True)
+    sunrise_when.add_argument(
+        "--at", dest="sunrise_at", type=timers.time_of_day_argument, metavar="HH:MM",
+        help=(
+            "wake time in 24-hour local time, such as 07:00: the next occurrence, when the ramp ends. If "
+            "the ramp would already have started, it is shortened to the time left (at least 1m)"
+        ),
+    )
+    sunrise_when.add_argument(
+        "--in", dest="delay_seconds", type=timers.duration_argument, metavar="DURATION",
+        help="start the ramp after this delay, such as 30s, 8h, or 1h30m (1s to 24h)",
+    )
+    sunrise.add_argument(
+        "--over", dest="sunrise_over", type=timers.sunrise_over_argument,
+        default=timers.SUNRISE_DEFAULT_SECONDS, metavar="DURATION",
+        help="ramp length, 1m to 6h (default 30m)",
+    )
+    _add_connection_options(sunrise, wait_for_connection_default=True)
     _add_alias_parser(subcommands)
     _add_group_parser(subcommands)
     _add_scene_parser(subcommands)
@@ -954,10 +984,46 @@ def _fade_text(arguments: argparse.Namespace) -> tuple[str, str]:
     return timers.fade_program_text(**fields), timers.fade_description(**fields)
 
 
+def _now() -> float:
+    return time.time()
+
+
+def _sunrise_plan(arguments: argparse.Namespace) -> tuple[str, str, int, list[str]]:
+    """Return program text, description, start delay, and extra output lines for ``sunrise``."""
+
+    now = _now()
+    notes: list[str] = []
+    over = arguments.sunrise_over
+    if arguments.sunrise_at is not None:
+        plan = timers.plan_sunrise_at(*arguments.sunrise_at, over, now)
+        over, wake_at = plan.over_seconds, plan.wake_at
+        delay = max(0, round(plan.start_at - now))
+        if plan.compressed:
+            notes.append(
+                f"The wake time is only {timers.format_duration(over)} away, so the ramp is shortened "
+                f"from {timers.format_duration(arguments.sunrise_over)} to {timers.format_duration(over)} "
+                "and starts now."
+            )
+    else:
+        delay = arguments.delay_seconds
+        wake_at = now + delay + over
+    wake_clock = time.strftime("%H:%M", time.localtime(wake_at))
+    description = timers.sunrise_description(over, wake_clock)
+    text = timers.sunrise_program_text(over, description=description)
+    notes.append(f"Wake time: {timers.format_wake_time(wake_at)}")
+    return text, description, delay, notes
+
+
 def _schedule_command(arguments: argparse.Namespace) -> int:
     """Compile the command, store a timer record, and start its background runner."""
 
-    text, description, _ = _scheduled_program(arguments)
+    notes: list[str] = []
+    if arguments.command == "sunrise":
+        text, description, delay_seconds, notes = _sunrise_plan(arguments)
+        parse_script(text, "sunrise")
+    else:
+        text, description, _ = _scheduled_program(arguments)
+        delay_seconds = arguments.delay_seconds
     light_name = getattr(arguments, "light", None)
     if light_name is not None:
         registry = config.LightRegistry() if config.is_address(light_name) else config.load_lights()
@@ -973,15 +1039,16 @@ def _schedule_command(arguments: argparse.Namespace) -> int:
         target=target,
         addresses=addresses,
         is_group=is_group,
-        delay_seconds=arguments.delay_seconds,
+        delay_seconds=delay_seconds,
         connection={"scan_timeout": arguments.scan_timeout, "connect_timeout": arguments.connect_timeout},
         credentials={"mesh_name": arguments.mesh_name, "password": arguments.password},
+        clock=_now,
     )
     fires = time.strftime("%H:%M:%S", time.localtime(record["fire_at"]))
-    print(
-        f"Scheduled {record['id']}: {description} at {fires} "
-        f"(in {timers.format_duration(arguments.delay_seconds)})"
-    )
+    when = f"in {timers.format_duration(delay_seconds)}" if delay_seconds else "now"
+    print(f"Scheduled {record['id']}: {description} at {fires} ({when})")
+    for note in notes:
+        print(note)
     return 0
 
 
@@ -1003,7 +1070,7 @@ async def run(arguments: argparse.Namespace) -> int:
         return _run_scene_command(arguments)
     if arguments.command == "timers":
         return timers.run_timers_command(arguments)
-    if getattr(arguments, "delay_seconds", None) is not None:
+    if arguments.command == "sunrise" or getattr(arguments, "delay_seconds", None) is not None:
         return _schedule_command(arguments)
 
     # Compile before locating or starting the daemon, so a bad final line

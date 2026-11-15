@@ -348,6 +348,41 @@ blemeshctl timers clear          # remove finished records
 A cancelled fade leaves the light at its last brightness. Mesh names and
 passwords are never written to timer records.
 
+### Sunrise alarm
+
+`blemeshctl sunrise` schedules a gradual wake-up light: a ramp from deep red
+through orange to a warm white that ends at full brightness at the wake time.
+
+```bash
+blemeshctl sunrise --at 07:00 --light bedroom            # 30-minute ramp ending at 07:00
+blemeshctl sunrise --at 06:45 --over 45m --address A4:C1:38:93:1B:72
+blemeshctl sunrise --in 8h --over 20m --light bedroom    # ramp starts in 8 hours
+```
+
+`--at HH:MM` is the wake time (24-hour local time, the next occurrence), so the
+ramp ends then and starts `--over` earlier (default 30m, from 1m to 6h). If you
+schedule after the ramp should already have started, it is shortened to the time
+that remains (at least 1 minute) and the output says so. `--in DURATION` instead
+starts the ramp after that delay. The output prints the timer id and the wake
+time, for example `Wake time: Sun 15 Nov 07:00`.
+
+The ramp uses RGB colour commands only. A colour command turns a light that is
+off on by itself, and the white channel is avoided because warm white
+temperatures were not usable on the tested strip. The end colour `ffb060` was
+chosen on that strip, where the RGB white `ffd6aa` looked bluish; edit
+`SUNRISE_KEYFRAMES` in `src/blemeshctl/timers.py` to change it. The light stays
+on at full brightness afterwards. Brightness has only 100 levels, so very short
+ramps show visible steps at the start; a 30-minute ramp sends about 250
+commands.
+
+It runs unattended in the background timer runner of your login session, so it
+is lost on reboot or logout, and the computer must stay awake and in Bluetooth
+range of the lights at the start time. List or cancel it with
+`blemeshctl timers` and `blemeshctl timers cancel ID`. During the ramp the
+runner holds the light's Bluetooth connection, so the phone app cannot control
+that light until the ramp ends. `examples/sunrise.blemesh` is a 2-minute demo of
+the same ramp that you can run with `blemeshctl script`.
+
 ## Android app
 
 The `android/` directory holds a native Android app that uses the same Telink

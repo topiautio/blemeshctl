@@ -9,7 +9,9 @@ import signal
 import stat
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -558,7 +560,7 @@ class ListAndCancelTests(TimerTestCase):
         self.assertEqual(timers.read_record(timers.record_path("abc123"))["state"], "cancelled")
 
 
-class CliSchedulingTests(TimerTestCase):
+class SchedulingTestCase(TimerTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.daemon = AsyncMock(return_value={"address": DESK, "mesh_address": 1, "reused": False, "idle_timeout": 60.0})
@@ -583,6 +585,8 @@ class CliSchedulingTests(TimerTestCase):
             result = asyncio.run(run(arguments))
         return result, stdout.getvalue(), stderr.getvalue()
 
+
+class CliSchedulingTests(SchedulingTestCase):
     def test_in_schedules_without_connecting_and_prints_the_id(self) -> None:
         result, output, _ = self.run_cli(["off", "--address", DESK, "--in", "20m", "--password", SECRET_PASSWORD])
         self.assertEqual(result, 0)
@@ -679,6 +683,286 @@ class CliSchedulingTests(TimerTestCase):
         for value in ("0s", "25h"):
             with self.subTest(value=value), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 build_parser().parse_args(["on", "--in", value])
+
+
+class SunriseProgramTests(unittest.TestCase):
+    def commands(self, text: str) -> list[tuple[str, int]]:
+        return [(line.split()[1], int(line.split()[2])) for line in text.splitlines() if line.startswith("color")]
+
+    def test_frame_endpoints_and_keyframes(self) -> None:
+        self.assertEqual(timers.sunrise_frame(0.0), ((255, 0, 0), 1))
+        self.assertEqual(timers.sunrise_frame(1.0), ((255, 0xB0, 0x60), 100))
+        for fraction, color, level in timers.SUNRISE_KEYFRAMES:
+            self.assertEqual(timers.sunrise_frame(fraction), (color, level))
+        # Halfway between the first two keyframes.
+        self.assertEqual(timers.sunrise_frame(0.15), ((255, 30, 0), 11))
+
+    def test_brightness_is_monotonic_and_ends_at_the_final_keyframe(self) -> None:
+        for over in (60, 120, 1800, 21600):
+            with self.subTest(over=over):
+                steps = self.commands(timers.sunrise_program_text(over))
+                levels = [level for _, level in steps]
+                self.assertEqual(levels, sorted(levels))
+                self.assertEqual(steps[0], ("ff0000", 1))
+                self.assertEqual(steps[-1], ("ffb060", 100))
+                self.assertTrue(all(1 <= level <= 100 for level in levels))
+                self.assertEqual(len(set(steps)), len(steps))
+
+    def test_only_rgb_colour_commands_and_waits(self) -> None:
+        text = timers.sunrise_program_text(1800)
+        for line in text.splitlines()[1:]:
+            self.assertRegex(line, r"^(color [0-9a-f]{6} [0-9]{1,3}|wait [0-9.]+s)$")
+        self.assertNotIn("white", text)
+        self.assertNotIn("on", text.split())
+        self.assertIsNone(timers.final_off_line(parse_script(text, "sunrise")))
+
+    def test_step_count_cap_and_total_duration(self) -> None:
+        for over in (60, 120, 1800, 3600, 21600):
+            with self.subTest(over=over):
+                text = timers.sunrise_program_text(over)
+                program = parse_script(text, "sunrise")
+                self.assertLessEqual(timers.count_commands(program), 301)
+                waits = [float(line.split()[1][:-1]) for line in text.splitlines() if line.startswith("wait")]
+                self.assertLessEqual(sum(waits), over + 0.01)
+                self.assertGreaterEqual(min(waits), 5.0 - 1e-9)
+        self.assertEqual(timers.count_commands(parse_script(timers.sunrise_program_text(120), "x")), 25)
+        self.assertLessEqual(timers.count_commands(parse_script(timers.sunrise_program_text(21600), "x")), 400)
+
+    def test_duplicate_steps_merge_their_waits(self) -> None:
+        text = timers.sunrise_program_text(21600)
+        waits = [float(line.split()[1][:-1]) for line in text.splitlines() if line.startswith("wait")]
+        self.assertIn(144.0, waits)
+        self.assertAlmostEqual(sum(waits), 21600 - 72.0 * 0, delta=72.0)
+        self.assertEqual(len(self.commands(text)), len(waits) + 1)
+
+    def test_out_of_range_lengths_are_rejected(self) -> None:
+        for over in (59, 21601):
+            with self.assertRaises(timers.TimerError):
+                timers.sunrise_program_text(over)
+
+    def test_description(self) -> None:
+        self.assertEqual(timers.sunrise_description(1800, "07:00"), "sunrise 30m ending 07:00")
+        self.assertEqual(timers.sunrise_program_text(120).splitlines()[0], "# sunrise 2m")
+
+
+class SunrisePlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Helsinki"
+        time.tzset()
+
+    def tearDown(self) -> None:
+        if self.old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.old_tz
+        time.tzset()
+        super().tearDown()
+
+    @staticmethod
+    def stamp(*parts: int) -> float:
+        return datetime(*parts).timestamp()
+
+    def test_wake_time_later_today_with_a_full_ramp(self) -> None:
+        now = self.stamp(2026, 11, 14, 6, 0)
+        plan = timers.plan_sunrise_at(7, 0, 1800, now)
+        self.assertEqual(plan.wake_at, self.stamp(2026, 11, 14, 7, 0))
+        self.assertEqual(plan.start_at, self.stamp(2026, 11, 14, 6, 30))
+        self.assertEqual((plan.over_seconds, plan.compressed), (1800, False))
+
+    def test_wake_time_earlier_today_means_tomorrow(self) -> None:
+        now = self.stamp(2026, 11, 14, 21, 20)
+        plan = timers.plan_sunrise_at(7, 0, 1800, now)
+        self.assertEqual(plan.wake_at, self.stamp(2026, 11, 15, 7, 0))
+        self.assertEqual(plan.start_at, self.stamp(2026, 11, 15, 6, 30))
+        # Exactly now is not strictly in the future.
+        same = timers.plan_sunrise_at(7, 0, 1800, self.stamp(2026, 11, 14, 7, 0))
+        self.assertEqual(same.wake_at, self.stamp(2026, 11, 15, 7, 0))
+
+    def test_late_start_is_compressed_to_the_time_that_remains(self) -> None:
+        now = self.stamp(2026, 11, 14, 6, 48) + 30.5
+        plan = timers.plan_sunrise_at(7, 0, 1800, now)
+        self.assertTrue(plan.compressed)
+        self.assertEqual((plan.start_at, plan.over_seconds), (now, 689))
+        self.assertEqual(plan.wake_at, self.stamp(2026, 11, 14, 7, 0))
+
+    def test_exactly_enough_time_is_not_compressed(self) -> None:
+        now = self.stamp(2026, 11, 14, 6, 30)
+        self.assertFalse(timers.plan_sunrise_at(7, 0, 1800, now).compressed)
+
+    def test_too_close_to_the_wake_time(self) -> None:
+        for now in (self.stamp(2026, 11, 14, 6, 59, 30), self.stamp(2026, 11, 14, 6, 59, 1)):
+            with self.subTest(now=now), self.assertRaisesRegex(
+                timers.TimerError, "too close to the wake time for a ramp; use a shorter --over or a later time"
+            ):
+                timers.plan_sunrise_at(7, 0, 1800, now)
+        self.assertEqual(timers.plan_sunrise_at(7, 0, 1800, self.stamp(2026, 11, 14, 6, 59)).over_seconds, 60)
+
+    def test_spring_forward_night_is_an_hour_shorter(self) -> None:
+        # Helsinki skips 03:00-04:00 on 2026-03-29, so 07:00 is only 6 real hours after 22:00... of the day before.
+        now = self.stamp(2026, 3, 28, 23, 0)
+        plan = timers.plan_sunrise_at(7, 0, 1800, now)
+        self.assertEqual(plan.wake_at - now, 7 * 3600)  # 8 wall hours, 7 real hours
+        self.assertEqual(plan.start_at - now, 7 * 3600 - 1800)
+        self.assertEqual(datetime.fromtimestamp(plan.wake_at).hour, 7)
+
+    def test_skipped_wall_time_still_resolves_to_a_future_instant(self) -> None:
+        now = self.stamp(2026, 3, 29, 1, 0)
+        wake = timers.next_local_time(3, 30, now)
+        self.assertGreater(wake, now)
+        self.assertLess(wake - now, 3 * 3600)
+
+    def test_fall_back_night_is_an_hour_longer(self) -> None:
+        # Helsinki repeats 03:00-04:00 on 2026-10-25.
+        now = self.stamp(2026, 10, 24, 23, 0)
+        plan = timers.plan_sunrise_at(7, 0, 1800, now)
+        self.assertEqual(plan.wake_at - now, 9 * 3600)  # 8 wall hours, 9 real hours
+        self.assertEqual(datetime.fromtimestamp(plan.wake_at).hour, 7)
+
+    def test_repeated_wall_time_picks_the_first_occurrence_still_ahead(self) -> None:
+        first = datetime(2026, 10, 25, 3, 30, fold=0).timestamp()
+        second = datetime(2026, 10, 25, 3, 30, fold=1).timestamp()
+        self.assertEqual(second - first, 3600)
+        self.assertEqual(timers.next_local_time(3, 30, first - 60), first)
+        self.assertEqual(timers.next_local_time(3, 30, first + 60), second)
+
+    def test_formatting(self) -> None:
+        self.assertEqual(timers.format_wake_time(self.stamp(2026, 11, 15, 7, 0)), "Sun 15 Nov 07:00")
+        self.assertEqual(timers.format_wake_time(self.stamp(2026, 11, 5, 7, 5)), "Thu 5 Nov 07:05")
+
+    def test_argument_parsers(self) -> None:
+        self.assertEqual(timers.time_of_day_argument("07:00"), (7, 0))
+        self.assertEqual(timers.time_of_day_argument("7:05"), (7, 5))
+        self.assertEqual(timers.time_of_day_argument("23:59"), (23, 59))
+        for bad in ("24:00", "12:60", "7", "0700", "07:0", "ab:cd", "", "7:00pm"):
+            with self.subTest(bad=bad), self.assertRaises(argparse.ArgumentTypeError):
+                timers.time_of_day_argument(bad)
+        self.assertEqual(timers.sunrise_over_argument("1m"), 60)
+        self.assertEqual(timers.sunrise_over_argument("6h"), 21600)
+        for bad in ("59s", "6h1s", "0s", "soon"):
+            with self.subTest(bad=bad), self.assertRaises(argparse.ArgumentTypeError):
+                timers.sunrise_over_argument(bad)
+
+
+class SunriseCliTests(SchedulingTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Helsinki"
+        time.tzset()
+        self.now = datetime(2026, 11, 14, 20, 23, 0).timestamp()
+        patcher = patch("blemeshctl.cli._now", lambda: self.now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self) -> None:
+        if self.old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.old_tz
+        time.tzset()
+        super().tearDown()
+
+    def test_at_schedules_the_runner_and_prints_the_id_and_wake_time(self) -> None:
+        result, output, _ = self.run_cli(["sunrise", "--at", "07:00", "--address", DESK, "--password", SECRET_PASSWORD])
+        self.assertEqual(result, 0)
+        self.daemon.assert_not_called()
+        [(path, credentials)] = self.spawned
+        self.assertEqual(
+            output,
+            f"Scheduled {path.stem}: sunrise 30m ending 07:00 at 06:30:00 (in 10h7m)\nWake time: Sun 15 Nov 07:00\n",
+        )
+        self.assertEqual(credentials["password"], SECRET_PASSWORD)
+        record = timers.read_record(path)
+        self.assertEqual(record["description"], "sunrise 30m ending 07:00")
+        self.assertEqual((record["target"], record["addresses"]), (DESK, [DESK]))
+        self.assertEqual(record["program"], timers.sunrise_program_text(1800, description="sunrise 30m ending 07:00"))
+        self.assertNotIn(SECRET_PASSWORD, path.read_text(encoding="utf-8"))
+        self.assertNotIn("white", record["program"])
+
+    def test_timers_listing_shows_the_description(self) -> None:
+        self.run_cli(["sunrise", "--in", "1h", "--over", "10m", "--address", DESK])
+        with patch("blemeshctl.timers.runner_is_alive", return_value=True):
+            _, output, _ = self.run_cli(["timers"])
+        self.assertIn("sunrise 10m ending 21:33", output)
+        self.assertIn("scheduled", output)
+
+    def test_in_starts_the_ramp_after_the_delay(self) -> None:
+        _, output, _ = self.run_cli(["sunrise", "--in", "8h", "--over", "45m", "--address", DESK])
+        self.assertRegex(output, r"sunrise 45m ending 05:08 at 04:23:00 \(in 8h\)\nWake time: Sun 15 Nov 05:08\n$")
+        record = timers.read_record(self.spawned[-1][0])
+        self.assertAlmostEqual(record["fire_at"] - record["created"], 8 * 3600, delta=5)
+
+    def test_compressed_ramp_is_reported(self) -> None:
+        self.now = datetime(2026, 11, 15, 6, 48, 0).timestamp()
+        result, output, _ = self.run_cli(["sunrise", "--at", "07:00", "--address", DESK])
+        self.assertEqual(result, 0)
+        self.assertIn("sunrise 12m ending 07:00 at ", output)
+        self.assertIn("(now)", output)
+        self.assertIn("shortened from 30m to 12m", output)
+        self.assertEqual(timers.read_record(self.spawned[-1][0])["description"], "sunrise 12m ending 07:00")
+
+    def test_too_close_to_the_wake_time_stores_nothing(self) -> None:
+        self.now = datetime(2026, 11, 15, 6, 59, 30).timestamp()
+        with self.assertRaisesRegex(timers.TimerError, "too close to the wake time"):
+            self.run_cli(["sunrise", "--at", "07:00", "--address", DESK])
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(list(timers.timers_directory().glob("*")), [])
+
+    def test_argument_errors(self) -> None:
+        cases = (
+            ["sunrise", "--address", DESK],
+            ["sunrise", "--at", "07:00", "--in", "1h"],
+            ["sunrise", "--at", "07:00", "--over", "30s"],
+            ["sunrise", "--at", "07:00", "--over", "7h"],
+            ["sunrise", "--at", "25:00"],
+            ["sunrise", "--at", "7am"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                build_parser().parse_args(argv)
+        self.assertEqual(build_parser().parse_args(["sunrise", "--at", "6:45"]).sunrise_over, 1800)
+        self.assertEqual(self.spawned, [])
+
+    def test_group_target_uses_the_same_path_as_fade(self) -> None:
+        config.add_alias("desk", DESK)
+        config.add_alias("shelf", SHELF)
+        config.add_group("room", ["desk", "shelf"])
+        self.run_cli(["sunrise", "--at", "07:00", "--light", "room"])
+        record = timers.read_record(self.spawned[-1][0])
+        self.assertTrue(record["is_group"])
+        self.assertEqual((record["target"], record["addresses"]), ("room", [DESK, SHELF]))
+
+    def test_runner_finishes_without_an_off(self) -> None:
+        self.run_cli(["sunrise", "--in", "1m", "--over", "1m", "--address", DESK])
+        path = self.spawned[-1][0]
+        backend = FakeBackend()
+        clock = FakeClock(now=timers.read_record(path)["fire_at"])
+        state = asyncio.run(
+            timers.run_timer(path, CREDENTIALS, lambda record, credentials: backend, clock=clock.time, sleep=clock.sleep)
+        )
+        self.assertEqual(state, timers.STATE_DONE)
+        self.assertEqual(len(backend.calls), 13)
+        self.assertEqual(backend.descriptions()[-1], "colour rgb #ffb060, brightness 100")
+        self.assertNotIn("off", backend.descriptions())
+
+
+class ExampleScriptTests(unittest.TestCase):
+    def test_every_shipped_example_compiles(self) -> None:
+        from blemeshctl.script import load_script
+
+        paths = sorted((Path(__file__).parents[1] / "examples").glob("*.blemesh"))
+        self.assertIn("sunrise.blemesh", [path.name for path in paths])
+        for path in paths:
+            with self.subTest(path=path.name):
+                self.assertTrue(load_script(path))
+
+    def test_sunrise_example_matches_the_generator(self) -> None:
+        text = (Path(__file__).parents[1] / "examples" / "sunrise.blemesh").read_text(encoding="utf-8")
+        body = "\n".join(line for line in text.splitlines() if not line.startswith("#"))
+        expected = "\n".join(timers.sunrise_program_text(120).splitlines()[1:])
+        self.assertEqual(body.strip(), expected.strip())
 
 
 class TimerBackendTests(TimerTestCase):
