@@ -22,11 +22,20 @@ class TimerTexts(
     private val zone: ZoneId = ZoneId.systemDefault(),
 ) {
     private val timeFormat = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT)
+    private val wakeFormat = DateTimeFormatter.ofPattern("d.M. 'klo' HH:mm", Locale.ROOT)
+
+    /** `15.11. klo 07:00` in the device's time zone. */
+    fun wakeClock(epochMillis: Long): String = wakeFormat.format(Instant.ofEpochMilli(epochMillis).atZone(zone))
 
     fun describe(summary: TimerSummary): String = when (summary.action) {
         TimerAction.ON -> text.get(R.string.timer_desc_on)
         TimerAction.OFF -> text.get(R.string.timer_desc_off)
         TimerAction.SCENE -> text.get(R.string.timer_desc_scene, summary.sceneName.orEmpty())
+        TimerAction.SUNRISE -> text.get(
+            R.string.timer_desc_sunrise,
+            TimerDuration.format(summary.fadeSeconds ?: 0L),
+            wakeClock(summary.wakeMillis ?: 0L),
+        )
         TimerAction.FADE -> {
             val to = summary.to?.let { text.get(R.string.timer_percent, it) } ?: text.get(R.string.timer_fade_to_off)
             val over = TimerDuration.format(summary.fadeSeconds ?: 0L)
@@ -48,6 +57,9 @@ class TimerTexts(
         ScheduleProblem.SCENE_INVALID -> text.get(R.string.timer_error_scene_invalid, detail.orEmpty())
         ScheduleProblem.BAD_PERCENT -> text.get(R.string.timer_error_percent)
         ScheduleProblem.BAD_COLOUR -> text.get(R.string.timer_error_colour, detail.orEmpty())
+        ScheduleProblem.BAD_TIME -> text.get(R.string.timer_error_time)
+        ScheduleProblem.SUNRISE_RANGE -> text.get(R.string.timer_error_sunrise_range)
+        ScheduleProblem.TOO_CLOSE -> text.get(R.string.timer_error_too_close)
     }
 
     fun state(state: TimerState): String = text.get(

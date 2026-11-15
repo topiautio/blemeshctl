@@ -4,16 +4,18 @@ import io.github.topiautio.blemeshctl.protocol.TelinkProtocol
 import io.github.topiautio.blemeshctl.script.BleMeshScript
 import io.github.topiautio.blemeshctl.script.ScriptException
 import java.math.BigInteger
+import java.time.ZoneId
 import java.util.Locale
+import kotlin.math.max
 
-enum class TimerAction { ON, OFF, SCENE, FADE }
+enum class TimerAction { ON, OFF, SCENE, FADE, SUNRISE }
 
 enum class FadeColour { WHEEL, WHITE }
 
 /** The input field a problem belongs to. */
-enum class ScheduleField { DELAY, SCENE, FADE_COLOUR, FADE_DURATION, FADE_FROM, FADE_TO }
+enum class ScheduleField { DELAY, SCENE, FADE_COLOUR, FADE_DURATION, FADE_FROM, FADE_TO, WAKE_TIME, SUNRISE_DURATION }
 
-enum class ScheduleProblem { EMPTY, INVALID_DURATION, TOO_SHORT, TOO_LONG, NO_SCENE, SCENE_INVALID, BAD_PERCENT, BAD_COLOUR }
+enum class ScheduleProblem { EMPTY, INVALID_DURATION, TOO_SHORT, TOO_LONG, NO_SCENE, SCENE_INVALID, BAD_PERCENT, BAD_COLOUR, BAD_TIME, SUNRISE_RANGE, TOO_CLOSE }
 
 /** What the user typed and chose in the timer section. */
 data class ScheduleInput(
@@ -28,6 +30,11 @@ data class ScheduleInput(
     val fadeDurationText: String = "",
     val fromText: String = "",
     val toText: String = "",
+    /** Wake time as 24-hour `HH:MM`; the sunrise ramp ends then. */
+    val wakeText: String = "",
+    /** Ramp length such as `30m`; blank means the default 30 minutes. */
+    val sunriseDurationText: String = "",
+    val zone: ZoneId = ZoneId.systemDefault(),
 )
 
 /** Structured description of a timer; [TimerTexts.describe] turns it into Finnish text. */
@@ -40,6 +47,8 @@ data class TimerSummary(
     /** Null means the fade ends with the light switched off. */
     val to: Int? = null,
     val fadeSeconds: Long? = null,
+    /** For a sunrise: when the ramp ends, in epoch milliseconds; [fadeSeconds] is its length. */
+    val wakeMillis: Long? = null,
 )
 
 /** A validated timer: the program to run [delaySeconds] from the moment it was built. */
@@ -84,6 +93,7 @@ object ScheduleBuilder {
     }
 
     fun build(input: ScheduleInput, nowMillis: Long): ScheduleResult {
+        if (input.action == TimerAction.SUNRISE) return buildSunrise(input, nowMillis)
         val delay = when (val check = checkDuration(input.delayText)) {
             is DurationCheck.Valid -> check.seconds
             is DurationCheck.Problem -> return ScheduleResult.Invalid(ScheduleField.DELAY, check.problem)
@@ -94,7 +104,42 @@ object ScheduleBuilder {
             TimerAction.OFF -> ready(TimerSummary(TimerAction.OFF), "off\n", delay, fireAt)
             TimerAction.SCENE -> buildScene(input, delay, fireAt)
             TimerAction.FADE -> buildFade(input, delay, fireAt)
+            TimerAction.SUNRISE -> throw IllegalStateException("handled above")
         }
+    }
+
+    private val TIME_OF_DAY = Regex("([0-9]{1,2}):([0-9]{2})")
+
+    private fun buildSunrise(input: ScheduleInput, nowMillis: Long): ScheduleResult {
+        val match = TIME_OF_DAY.matchEntire(input.wakeText.trim())
+        val hour = match?.groupValues?.get(1)?.toInt()
+        val minute = match?.groupValues?.get(2)?.toInt()
+        if (hour == null || minute == null || hour > 23 || minute > 59) {
+            return ScheduleResult.Invalid(ScheduleField.WAKE_TIME, ScheduleProblem.BAD_TIME)
+        }
+        val overSeconds = if (input.sunriseDurationText.isBlank()) {
+            SunriseProgram.DEFAULT_SECONDS.toLong()
+        } else {
+            when (val check = checkDuration(input.sunriseDurationText)) {
+                is DurationCheck.Valid -> check.seconds
+                is DurationCheck.Problem -> return ScheduleResult.Invalid(ScheduleField.SUNRISE_DURATION, check.problem)
+            }
+        }
+        if (overSeconds !in SunriseProgram.MIN_SECONDS..SunriseProgram.MAX_SECONDS) {
+            return ScheduleResult.Invalid(ScheduleField.SUNRISE_DURATION, ScheduleProblem.SUNRISE_RANGE)
+        }
+        val plan = try {
+            SunriseProgram.plan(hour, minute, overSeconds.toInt(), nowMillis, input.zone)
+        } catch (exception: TimerException) {
+            return ScheduleResult.Invalid(ScheduleField.WAKE_TIME, ScheduleProblem.TOO_CLOSE, exception.message)
+        }
+        val summary = TimerSummary(
+            action = TimerAction.SUNRISE,
+            fadeSeconds = plan.overSeconds.toLong(),
+            wakeMillis = plan.wakeMillis,
+        )
+        val delay = max(0L, (plan.startMillis - nowMillis + 999) / 1000)
+        return ready(summary, SunriseProgram.text(plan.overSeconds), delay, plan.startMillis)
     }
 
     private fun buildScene(input: ScheduleInput, delay: Long, fireAt: Long): ScheduleResult {
